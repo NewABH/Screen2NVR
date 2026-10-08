@@ -1,0 +1,40 @@
+# Visual Studio / VS Code local state
+.vs/
+.vscode/
+out/
+
+# CMake and MSVC build products
+x64/
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+*.obj
+*.res
+*.pdb
+*.ilk
+*.idb
+*.ipch
+*.tlog
+*.lastbuildstate
+*.aps
+
+# Packaged binaries belong in GitHub Releases
+dist/
+Screen2NVR-Release-*.zip
+*.exe
+*.msi
+
+# Machine-specific runtime state and secrets
+config.ini
+camera.ini
+onvif.uuid
+logs/
+*.log
+*.log.1
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*~

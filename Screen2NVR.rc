@@ -1,0 +1,2 @@
+#define IDI_SCREEN2NVR 101
+IDI_SCREEN2NVR ICON "assets\\Screen2NVR.ico"
