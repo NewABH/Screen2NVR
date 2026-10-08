@@ -141,6 +141,48 @@ std::vector<NalUnit> SplitNalUnits(const uint8_t* data, size_t size)
     if (units.empty() && size > 0) units.push_back({ data, size });
     return units;
 }
+
+std::vector<NalUnit> OrderAccessUnit(std::vector<NalUnit> units, bool containsIdr,
+                                    const std::vector<uint8_t>& cachedSps,
+                                    const std::vector<uint8_t>& cachedPps)
+{
+    if (!containsIdr)
+    {
+        const auto aud = std::find_if(units.begin(), units.end(), [](const NalUnit& unit) {
+            return unit.size && (unit.data[0] & 0x1F) == 9;
+        });
+        if (aud != units.end()) std::rotate(units.begin(), aud, aud + 1);
+        return units; // Reuse the split vector without another allocation on every P frame.
+    }
+    std::vector<NalUnit> ordered;
+    ordered.reserve(units.size() + 2);
+    // H.264 7.4.1.2.3: an AUD, when present, must be the first NAL in the access unit.
+    // Do not prepend cached parameter sets ahead of the encoder's delimiter.
+    for (const auto& unit : units)
+        if (unit.size && (unit.data[0] & 0x1F) == 9) ordered.push_back(unit);
+    if (containsIdr)
+    {
+        // Retain every original parameter set (including distinct parameter-set IDs).
+        // Supply a cached set only when the encoder omitted that kind on this IDR.
+        for (const uint8_t type : { uint8_t(7), uint8_t(8) })
+        {
+            bool found = false;
+            for (const auto& unit : units)
+                if (unit.size && (unit.data[0] & 0x1F) == type)
+                { ordered.push_back(unit); found = true; }
+            const auto& cached = type == 7 ? cachedSps : cachedPps;
+            if (!found && !cached.empty()) ordered.push_back({ cached.data(), cached.size() });
+        }
+    }
+    for (const auto& unit : units)
+    {
+        if (!unit.size) continue;
+        const uint8_t type = unit.data[0] & 0x1F;
+        if (type == 9 || (containsIdr && (type == 7 || type == 8))) continue;
+        ordered.push_back(unit);
+    }
+    return ordered;
+}
 }
 
 struct RtspServer::Impl
@@ -286,10 +328,10 @@ struct RtspServer::Impl
             currentSps = sps;
             currentPps = pps;
         }
-        if (!currentSps.empty()) SendNal(currentSps.data(), currentSps.size(), timestamp, false, streamIndex);
-        if (!currentPps.empty()) SendNal(currentPps.data(), currentPps.size(), timestamp, false, streamIndex);
-        for (size_t index = 0; index < units.size(); ++index)
-            SendNal(units[index].data, units[index].size, timestamp, index + 1 == units.size(), streamIndex);
+        const auto ordered = OrderAccessUnit(std::move(units), containsIdr, currentSps, currentPps);
+        for (size_t index = 0; index < ordered.size(); ++index)
+            SendNal(ordered[index].data, ordered[index].size, timestamp,
+                    index + 1 == ordered.size(), streamIndex);
     }
 
     void AcceptLoop()

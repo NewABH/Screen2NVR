@@ -5,6 +5,7 @@
 #include <aclapi.h>
 
 #include "Settings.h"
+#include "Localization.h"
 
 #include <algorithm>
 #include <cwctype>
@@ -70,17 +71,23 @@ bool SettingsFileError(const wchar_t* operation, const std::wstring& path,
                        DWORD code, std::wstring& error)
 {
     wchar_t message[1024]{};
+    const DWORD language = MAKELANGID(IsEnglishUi() ? LANG_ENGLISH : LANG_RUSSIAN, SUBLANG_DEFAULT);
     FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-                   nullptr, code, 0, message, ARRAYSIZE(message), nullptr);
-    error = std::wstring(operation) + L"\n" + path + L"\n\nКод Windows: " +
+                   nullptr, code, language, message, ARRAYSIZE(message), nullptr);
+    error = std::wstring(operation) + L"\n" + path + UiText(L"\n\nКод Windows: ", L"\n\nWindows error code: ") +
             std::to_wstring(code) + L". " + message;
     if (code == ERROR_ACCESS_DENIED || code == ERROR_WRITE_PROTECT)
-        error += L"\nПроверьте атрибут «Только чтение» и права на папку и файл. "
-                 L"Для восстановления прав установки повторно запустите установщик Screen2NVR. "
-                 L"Саму программу не требуется постоянно запускать от администратора.";
+        error += UiText(L"\nПроверьте атрибут «Только чтение» и права на папку и файл. "
+                        L"Для восстановления прав установки повторно запустите установщик Screen2NVR. "
+                        L"Саму программу не требуется постоянно запускать от администратора.",
+                        L"\nCheck the Read-only attribute and the folder and file permissions. "
+                        L"Run the Screen2NVR installer again to restore installation permissions. "
+                        L"The application itself does not need to run permanently as administrator.");
     else if (IsTransientFileError(code))
-        error += L"\nФайл занят другой программой. Закройте редактор настроек и повторите сохранение.";
-    error += L"\nНовые настройки не применены. Предыдущие настройки не удаляются.";
+        error += UiText(L"\nФайл занят другой программой. Закройте редактор настроек и повторите сохранение.",
+                        L"\nThe file is in use by another program. Close the settings editor and save again.");
+    error += UiText(L"\nНовые настройки не применены. Предыдущие настройки не удаляются.",
+                    L"\nThe new settings were not applied. The previous settings have been preserved.");
     return false;
 }
 
@@ -106,7 +113,7 @@ bool CreateSettingsTemporary(const std::wstring& destination, const std::vector<
     GUID id{};
     wchar_t suffix[40]{};
     if (FAILED(CoCreateGuid(&id)) || StringFromGUID2(id, suffix, ARRAYSIZE(suffix)) == 0)
-        return SettingsFileError(L"Не удалось подготовить временный файл настроек:", destination,
+        return SettingsFileError(UiText(L"Не удалось подготовить временный файл настроек:", L"Could not prepare the temporary settings file:"), destination,
                                  ERROR_GEN_FAILURE, error);
     const std::wstring path = destination + L"." + suffix + L".tmp";
     SECURITY_ATTRIBUTES attributes{ sizeof(attributes), security.descriptor, FALSE };
@@ -114,7 +121,7 @@ bool CreateSettingsTemporary(const std::wstring& destination, const std::vector<
                                 security.descriptor ? &attributes : nullptr,
                                 CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (output == INVALID_HANDLE_VALUE)
-        return SettingsFileError(L"Не удалось создать временный файл рядом с настройками:",
+        return SettingsFileError(UiText(L"Не удалось создать временный файл рядом с настройками:", L"Could not create a temporary file next to the settings:"),
                                  destination, GetLastError(), error);
     temporary.path = path;
     DWORD written = 0;
@@ -122,7 +129,7 @@ bool CreateSettingsTemporary(const std::wstring& destination, const std::vector<
     const DWORD code = ok ? ERROR_WRITE_FAULT : GetLastError();
     CloseHandle(output);
     if (!ok || written != contents.size())
-        return SettingsFileError(L"Не удалось записать временный файл настроек:", destination, code, error);
+        return SettingsFileError(UiText(L"Не удалось записать временный файл настроек:", L"Could not write the temporary settings file:"), destination, code, error);
     return true;
 }
 
@@ -141,7 +148,7 @@ bool ReadSettingsBytes(const std::wstring& path, std::vector<BYTE>& contents, bo
         const DWORD code = GetLastError();
         exists = code != ERROR_FILE_NOT_FOUND;
         if (!exists) return true;
-        return SettingsFileError(L"Не удалось прочитать текущие настройки:", path, code, error);
+        return SettingsFileError(UiText(L"Не удалось прочитать текущие настройки:", L"Could not read the current settings:"), path, code, error);
     }
     exists = true;
     // The staging copy contains credentials too: it must not gain broader permissions
@@ -151,7 +158,7 @@ bool ReadSettingsBytes(const std::wstring& path, std::vector<BYTE>& contents, bo
     if (securityError != ERROR_SUCCESS)
     {
         CloseHandle(input);
-        return SettingsFileError(L"Не удалось прочитать права файла настроек:", path, securityError, error);
+        return SettingsFileError(UiText(L"Не удалось прочитать права файла настроек:", L"Could not read the settings file permissions:"), path, securityError, error);
     }
     LARGE_INTEGER size{};
     bool ok = GetFileSizeEx(input, &size) != FALSE;
@@ -166,7 +173,7 @@ bool ReadSettingsBytes(const std::wstring& path, std::vector<BYTE>& contents, bo
     }
     else ok = false;
     CloseHandle(input);
-    return ok || SettingsFileError(L"Не удалось прочитать текущие настройки:", path, code, error);
+    return ok || SettingsFileError(UiText(L"Не удалось прочитать текущие настройки:", L"Could not read the current settings:"), path, code, error);
 }
 
 std::wstring CurrentExecutablePath()
@@ -401,7 +408,7 @@ bool SetAutoStartEnabled(bool enabled, std::wstring& error)
     if (RegCreateKeyExW(HKEY_CURRENT_USER, kRunKey, 0, nullptr, 0, KEY_SET_VALUE,
                         nullptr, &key, nullptr) != ERROR_SUCCESS)
     {
-        error = L"Не удалось открыть раздел автозагрузки Windows.";
+        error = UiText(L"Не удалось открыть раздел автозагрузки Windows.", L"Could not open the Windows startup registry key.");
         return false;
     }
     LSTATUS status = ERROR_SUCCESS;
@@ -418,7 +425,7 @@ bool SetAutoStartEnabled(bool enabled, std::wstring& error)
         if (status == ERROR_FILE_NOT_FOUND) status = ERROR_SUCCESS;
     }
     RegCloseKey(key);
-    if (status != ERROR_SUCCESS) error = L"Не удалось изменить автозагрузку Windows.";
+    if (status != ERROR_SUCCESS) error = UiText(L"Не удалось изменить автозагрузку Windows.", L"Could not change Windows startup settings.");
     return status == ERROR_SUCCESS;
 }
 
@@ -433,6 +440,9 @@ AppSettings LoadAppSettings()
     if (!IsConfigUsable(path) && IsConfigUsable(backupPath))
         path = backupPath;
     AppSettings settings;
+    settings.uiLanguage = ReadNumber(L"General", L"Language", DefaultUiLanguage(), 0, 1, path);
+    SetUiLanguage(settings.uiLanguage);
+    settings.standbyText = UiText(L"Экран временно недоступен", L"Screen temporarily unavailable");
     settings.cameraName = ReadText(L"Camera", L"Name", settings.cameraName.c_str(), path);
     settings.onvifPort = static_cast<uint16_t>(ReadNumber(L"Network", L"OnvifPort", settings.onvifPort, 1, 65535, path));
     settings.rtspPort = static_cast<uint16_t>(ReadNumber(L"Network", L"RtspPort", settings.rtspPort, 1, 65535, path));
@@ -516,7 +526,8 @@ bool SaveAppSettings(const AppSettings& settings, std::wstring& error)
     if (!SaveAppSettingsFile(settings, GetScreen2NvrConfigPath(), error)) return false;
     if (!SetAutoStartEnabled(settings.autoStart, error))
     {
-        error += L"\nФайл настроек сохранён, но изменить автозагрузку не удалось.";
+        error += UiText(L"\nФайл настроек сохранён, но изменить автозагрузку не удалось.",
+                        L"\nThe settings file was saved, but Windows startup could not be changed.");
         return false;
     }
     return true;
@@ -530,7 +541,7 @@ bool SaveAppSettingsFile(const AppSettings& settings, const std::wstring& destin
     std::error_code directoryError;
     std::filesystem::create_directories(std::filesystem::path(destination).parent_path(), directoryError);
     if (directoryError)
-        return SettingsFileError(L"Не удалось создать папку настроек:", destination,
+        return SettingsFileError(UiText(L"Не удалось создать папку настроек:", L"Could not create the settings folder:"), destination,
                                  static_cast<DWORD>(directoryError.value()), error);
     std::vector<BYTE> original;
     SettingsSecurity security;
@@ -568,6 +579,7 @@ bool SaveAppSettingsFile(const AppSettings& settings, const std::wstring& destin
     };
     const auto number = [](uint32_t value) { return std::to_wstring(value); };
     bool ok = true;
+    ok &= WriteValue(L"General", L"Language", number(settings.uiLanguage), path);
     ok &= WriteValue(L"Camera", L"Name", settings.cameraName, path);
     // Hardware identity is read on this PC, never copied from an INI to another PC.
     ok &= WriteValue(L"Network", L"OnvifPort", number(settings.onvifPort), path);
@@ -634,7 +646,7 @@ bool SaveAppSettingsFile(const AppSettings& settings, const std::wstring& destin
     ok &= WriteValue(L"Logging", L"Enabled", settings.loggingEnabled ? L"1" : L"0", path);
     WritePrivateProfileStringW(nullptr, nullptr, nullptr, path.c_str());
     if (!ok)
-        return SettingsFileError(L"Не удалось записать новые настройки:", destination,
+        return SettingsFileError(UiText(L"Не удалось записать новые настройки:", L"Could not write the new settings:"), destination,
                                  writeError == ERROR_SUCCESS ? ERROR_WRITE_FAULT : writeError, error);
 
     HANDLE staged = INVALID_HANDLE_VALUE;
@@ -645,12 +657,12 @@ bool SaveAppSettingsFile(const AppSettings& settings, const std::wstring& destin
                                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
             return staged != INVALID_HANDLE_VALUE;
         }))
-        return SettingsFileError(L"Не удалось проверить запись настроек:", destination, GetLastError(), error);
+        return SettingsFileError(UiText(L"Не удалось проверить запись настроек:", L"Could not verify the settings write:"), destination, GetLastError(), error);
     const bool flushed = FlushFileBuffers(staged) != FALSE;
     const DWORD flushError = GetLastError();
     CloseHandle(staged);
     if (!flushed)
-        return SettingsFileError(L"Не удалось завершить запись настроек на диск:", destination, flushError, error);
+        return SettingsFileError(UiText(L"Не удалось завершить запись настроек на диск:", L"Could not finish writing the settings to disk:"), destination, flushError, error);
 
     // ReplaceFile preserves the destination ACL and keeps its previous bytes as a backup.
     // Never fall back to CREATE_ALWAYS/CopyFile-overwrite if replacement is denied.
@@ -675,9 +687,9 @@ bool SaveAppSettingsFile(const AppSettings& settings, const std::wstring& destin
             if (!MoveFileExW(replacedPath.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH))
                 damagedPrevious.path.clear(); // Leave the recovery file intact if restoration is blocked.
         }
-        SettingsFileError(L"Не удалось заменить файл настроек:", destination, code, error);
+        SettingsFileError(UiText(L"Не удалось заменить файл настроек:", L"Could not replace the settings file:"), destination, code, error);
         if (exists && GetFileAttributesW(replacedPath.c_str()) != INVALID_FILE_ATTRIBUTES)
-            error += L"\nРезервная копия: " + replacedPath;
+            error += UiText(L"\nРезервная копия: ", L"\nBackup: ") + replacedPath;
         damagedPrevious.path.clear(); // Do not remove recovery data after a failed replacement.
         return false;
     }
@@ -746,6 +758,7 @@ std::wstring MigrateOverlayTemplate(std::wstring text, bool dateTime, bool camer
 
 void CopyLiveSettings(AppSettings& running, const AppSettings& saved)
 {
+    running.uiLanguage = saved.uiLanguage;
     // Never apply coordinates for a pending resolution change to the old-sized stream.
     if (running.outputWidth == saved.outputWidth && running.outputHeight == saved.outputHeight)
     {

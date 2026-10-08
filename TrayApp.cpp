@@ -14,6 +14,7 @@
 #include "Screen2ONVIF.h"
 #include "Security.h"
 #include "CaptureGeometry.h"
+#include "Localization.h"
 
 #include <algorithm>
 #include <cmath>
@@ -46,6 +47,7 @@ constexpr int kFps = 2010;
 constexpr int kBitrate = 2011;
 constexpr int kGop = 2012;
 constexpr int kAutoStart = 2014;
+constexpr int kLanguage = 2013;
 constexpr int kSave = 2015;
 constexpr int kCancel = 2016;
 constexpr int kChooseFont = 2017;
@@ -107,6 +109,7 @@ public:
 
     int Run()
     {
+        SetUiLanguage(settings_.uiLanguage);
         INITCOMMONCONTROLSEX controls{ sizeof(controls), ICC_TAB_CLASSES | ICC_BAR_CLASSES };
         InitCommonControlsEx(&controls);
         taskbarCreatedMessage_ = RegisterWindowMessageW(L"TaskbarCreated");
@@ -123,7 +126,8 @@ public:
 
         RECT bounds{ 0, 0, 960, 640 };
         AdjustWindowRectEx(&bounds, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, WS_EX_APPWINDOW);
-        window_ = CreateWindowExW(WS_EX_APPWINDOW, windowClass.lpszClassName, L"Настройки Screen2NVR",
+        window_ = CreateWindowExW(WS_EX_APPWINDOW, windowClass.lpszClassName,
+                                  UiText(L"Настройки Screen2NVR", L"Screen2NVR Settings"),
                                   WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
                                   CW_USEDEFAULT, CW_USEDEFAULT, bounds.right - bounds.left, bounds.bottom - bounds.top, nullptr, nullptr,
                                   windowClass.hInstance, this);
@@ -440,14 +444,14 @@ private:
         {
             std::wstring reason;
             { std::lock_guard<std::mutex> lock(status_.mutex); reason = status_.error; }
-            if (reason.empty()) reason = L"Видеоконвейер неожиданно завершил работу.";
+            if (reason.empty()) reason = UiText(L"Видеоконвейер неожиданно завершил работу.", L"The video pipeline stopped unexpectedly.");
             if (status_.publishedFrames.load(std::memory_order_acquire) == 0)
             {
                 recoveryAttempted_ = true;
                 if (status_.logger)
                     status_.logger("Startup failure before the first H.264 frame; automatic restart suppressed: " +
                                    WideToUtf8String(reason));
-                MessageBoxW(window_, reason.c_str(), L"Ошибка запуска Screen2NVR",
+                MessageBoxW(window_, reason.c_str(), UiText(L"Ошибка запуска Screen2NVR", L"Screen2NVR startup error"),
                             MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND);
                 ExitApplication();
                 return;
@@ -464,12 +468,12 @@ private:
 
         if (uptime > kStartupTimeoutMs && phase < PipelinePhase::captureReady)
         {
-            ScheduleRecovery(L"За 60 секунд не удалось запустить захват экрана DXGI.");
+            ScheduleRecovery(UiText(L"За 60 секунд не удалось запустить захват экрана DXGI.", L"DXGI screen capture did not start within 60 seconds."));
             return;
         }
         if (phase >= PipelinePhase::encoderReady && lastPublished == 0 && uptime > kStartupTimeoutMs)
         {
-            ScheduleRecovery(L"Аппаратный H.264-кодировщик не выдал ни одного кадра за 60 секунд.");
+            ScheduleRecovery(UiText(L"Аппаратный H.264-кодировщик не выдал ни одного кадра за 60 секунд.", L"The H.264 encoder did not produce a frame within 60 seconds."));
             return;
         }
         if (lastPublished != 0 && now - lastPublished > kPipelineStallTimeoutMs)
@@ -477,9 +481,12 @@ private:
             const uint64_t ageSeconds = (now - lastPublished) / 1000;
             const uint64_t frames = status_.publishedFrames.load(std::memory_order_relaxed);
             const uint64_t bytes = status_.publishedBytes.load(std::memory_order_relaxed);
-            ScheduleRecovery(L"Трансляция H.264/RTSP остановилась: закодированные кадры не поступают " +
-                             std::to_wstring(ageSeconds) + L" с. Перед остановкой опубликовано " +
-                             std::to_wstring(frames) + L" кадров (" + std::to_wstring(bytes) + L" байт)." );
+            ScheduleRecovery(UiText(L"Трансляция H.264/RTSP остановилась: закодированные кадры не поступают ",
+                                    L"The H.264/RTSP stream stopped: no encoded frames for ") +
+                             std::to_wstring(ageSeconds) + UiText(L" с. Перед остановкой опубликовано ",
+                                                                  L" s. Frames published before the stall: ") +
+                             std::to_wstring(frames) + UiText(L" кадров (", L" (") +
+                             std::to_wstring(bytes) + UiText(L" байт).", L" bytes)."));
             return;
         }
         const uint64_t lastProbe = status_.rtspProbeHeartbeatMs.load(std::memory_order_acquire);
@@ -490,32 +497,33 @@ private:
             if ((subPublished == 0 && uptime > kStartupTimeoutMs) ||
                 (subPublished != 0 && now - subPublished > kPipelineStallTimeoutMs))
             {
-                ScheduleRecovery(L"Вторичный поток H.264 перестал выдавать кадры.");
+                ScheduleRecovery(UiText(L"Вторичный поток H.264 перестал выдавать кадры.", L"The H.264 sub stream stopped producing frames."));
                 return;
             }
             if (subPublished != 0 && uptime > kStartupTimeoutMs && (subProbe == 0 || now - subProbe > 30'000))
             {
-                ScheduleRecovery(L"Локальная проверка RTSP вторичного потока не получает видео более 30 секунд.");
+                ScheduleRecovery(UiText(L"Локальная проверка RTSP вторичного потока не получает видео более 30 секунд.", L"The local sub-stream RTSP probe has received no video for more than 30 seconds."));
                 return;
             }
         }
         if (lastPublished != 0 && uptime > 30'000 && (lastProbe == 0 || now - lastProbe > 30'000))
         {
-            ScheduleRecovery(L"Встроенная внешняя проверка RTSP не может подключиться к локальному серверу более 30 секунд.");
+            ScheduleRecovery(UiText(L"Встроенная внешняя проверка RTSP не может подключиться к локальному серверу более 30 секунд.", L"The built-in RTSP probe has been unable to connect to the local server for more than 30 seconds."));
             return;
         }
         if (lastCapture != 0 && now - lastCapture > kPipelineStallTimeoutMs)
         {
             const uint64_t ageSeconds = (now - lastCapture) / 1000;
-            ScheduleRecovery(L"Завис захват или GPU-обработка экрана: конвейер не обновлялся " +
-                             std::to_wstring(ageSeconds) + L" с.");
+            ScheduleRecovery(UiText(L"Завис захват или GPU-обработка экрана: конвейер не обновлялся ",
+                                    L"Screen capture or GPU processing stalled: the pipeline has not updated for ") +
+                             std::to_wstring(ageSeconds) + UiText(L" с.", L" s."));
         }
     }
 
     void ShowRecoveryNotification(const std::wstring& reason)
     {
         tray_.uFlags = NIF_INFO;
-        wcscpy_s(tray_.szInfoTitle, L"Screen2NVR: поток остановлен");
+        wcscpy_s(tray_.szInfoTitle, UiText(L"Screen2NVR: поток остановлен", L"Screen2NVR: stream stopped"));
         wcsncpy_s(tray_.szInfo, reason.c_str(), _TRUNCATE);
         tray_.dwInfoFlags = NIIF_ERROR | NIIF_LARGE_ICON;
         tray_.uTimeout = static_cast<UINT>(kRestartNotificationMs);
@@ -543,8 +551,9 @@ private:
                                                     nullptr, SW_SHOWNORMAL)) <= 32)
         {
             if (status_.logger) status_.logger("WATCHDOG ERROR: failed to launch replacement process.");
-            MessageBoxW(window_, (reason + L"\n\nНе удалось автоматически запустить новый экземпляр.").c_str(),
-                        L"Ошибка Screen2NVR", MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND);
+            MessageBoxW(window_, (reason + UiText(L"\n\nНе удалось автоматически запустить новый экземпляр.",
+                                                        L"\n\nA new instance could not be started automatically.")).c_str(),
+                        UiText(L"Ошибка Screen2NVR", L"Screen2NVR error"), MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND);
             return;
         }
         running_ = false;
@@ -614,7 +623,10 @@ private:
         if (!uiFont_) uiFont_ = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
         tab_ = CreateControl(nullptr, 0, WC_TABCONTROLW, L"", WS_CLIPSIBLINGS | WS_TABSTOP,
                              10, 10, 940, 580, kTab);
-        for (const wchar_t* name : { L"Устройство", L"Видео", L"Наложение", L"Безопасность", L"Состояние" })
+        for (const wchar_t* name : {
+            UiText(L"Устройство", L"Device"), UiText(L"Видео", L"Video"),
+            UiText(L"Наложение", L"Overlay"), UiText(L"Безопасность", L"Security"),
+            UiText(L"Состояние", L"Status") })
         {
             TCITEMW item{};
             item.mask = TCIF_TEXT;
@@ -622,26 +634,31 @@ private:
             TabCtrl_InsertItem(tab_, TabCtrl_GetItemCount(tab_), &item);
         }
 
-        CreateControl(&deviceControls_, 0, L"BUTTON", L"Камера и подключение", BS_GROUPBOX, 25, 50, 420, 220);
-        CreateControl(&deviceControls_, 0, L"STATIC", L"Имя камеры", SS_LEFT, 45, 80, 380, 22);
+        CreateControl(&deviceControls_, 0, L"BUTTON", UiText(L"Камера и подключение", L"Camera and connection"), BS_GROUPBOX, 25, 50, 420, 225);
+        CreateControl(&deviceControls_, 0, L"STATIC", UiText(L"Имя камеры", L"Camera name"), SS_LEFT, 45, 80, 380, 22);
         CreateControl(&deviceControls_, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL, 45, 106, 380, 26, kCameraName);
-        CreateControl(&deviceControls_, 0, L"STATIC", L"Порт ONVIF", SS_LEFT, 45, 151, 170, 22);
+        CreateControl(&deviceControls_, 0, L"STATIC", UiText(L"Порт ONVIF", L"ONVIF port"), SS_LEFT, 45, 151, 170, 22);
         CreateControl(&deviceControls_, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_NUMBER | ES_AUTOHSCROLL, 45, 177, 170, 26, kOnvifPort);
-        CreateControl(&deviceControls_, 0, L"STATIC", L"Порт RTSP", SS_LEFT, 245, 151, 170, 22);
+        CreateControl(&deviceControls_, 0, L"STATIC", UiText(L"Порт RTSP", L"RTSP port"), SS_LEFT, 245, 151, 170, 22);
         CreateControl(&deviceControls_, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_NUMBER | ES_AUTOHSCROLL, 245, 177, 170, 26, kRtspPort);
-        CreateControl(&deviceControls_, 0, L"BUTTON", L"Запускать при входе в Windows",
-                      BS_AUTOCHECKBOX, 45, 232, 380, 25, kAutoStart);
+        CreateControl(&deviceControls_, 0, L"STATIC", UiText(L"Язык", L"Language"), SS_CENTERIMAGE, 45, 216, 170, 25);
+        HWND language = CreateControl(&deviceControls_, WS_EX_CLIENTEDGE, L"COMBOBOX", L"",
+                                      CBS_DROPDOWNLIST, 245, 216, 170, 80, kLanguage);
+        SendMessageW(language, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Русский"));
+        SendMessageW(language, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"English"));
+        CreateControl(&deviceControls_, 0, L"BUTTON", UiText(L"Запускать при входе в Windows", L"Start when I sign in to Windows"),
+                      BS_AUTOCHECKBOX, 45, 247, 370, 25, kAutoStart);
 
-        CreateControl(&videoControls_, 0, L"STATIC", L"Основной поток · H.264", SS_CENTERIMAGE, 250, 50, 350, 25);
-        CreateControl(&videoControls_, 0, L"BUTTON", L"Включить вторичный поток", BS_AUTOCHECKBOX,
+        CreateControl(&videoControls_, 0, L"STATIC", UiText(L"Основной поток · H.264", L"Main stream · H.264"), SS_CENTERIMAGE, 250, 50, 350, 25);
+        CreateControl(&videoControls_, 0, L"BUTTON", UiText(L"Включить вторичный поток", L"Enable sub stream"), BS_AUTOCHECKBOX,
                       640, 50, 280, 25, kSubEnabled);
-        CreateControl(&videoControls_, 0, L"STATIC", L"Профиль качества", SS_CENTERIMAGE, 30, 90, 210, 25);
+        CreateControl(&videoControls_, 0, L"STATIC", UiText(L"Профиль качества", L"Quality profile"), SS_CENTERIMAGE, 30, 90, 210, 25);
         HWND profile = CreateControl(&videoControls_, WS_EX_CLIENTEDGE, L"COMBOBOX", L"",
                                      CBS_DROPDOWNLIST | WS_VSCROLL, 250, 90, 360, 160, kVideoProfile);
-        for (const wchar_t* item : { L"Пользовательский", L"Экономичный — 8 FPS",
-                                     L"Стандартный — 12 FPS", L"Плавный — 25 FPS" })
+        for (const wchar_t* item : { UiText(L"Пользовательский", L"Custom"), UiText(L"Экономичный — 8 FPS", L"Economy — 8 FPS"),
+                                     UiText(L"Стандартный — 12 FPS", L"Standard — 12 FPS"), UiText(L"Плавный — 25 FPS", L"Smooth — 25 FPS") })
             SendMessageW(profile, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
-        CreateControl(&videoControls_, 0, L"STATIC", L"H.264 · уменьшенная копия", SS_CENTERIMAGE, 640, 90, 275, 25);
+        CreateControl(&videoControls_, 0, L"STATIC", UiText(L"H.264 · уменьшенная копия", L"H.264 · scaled copy"), SS_CENTERIMAGE, 640, 90, 275, 25);
         const auto streamRow = [&](const wchar_t* label, int mainId, int subId, int y)
         {
             CreateControl(&videoControls_, 0, L"STATIC", label, SS_CENTERIMAGE, 30, y, 210, 25);
@@ -650,102 +667,104 @@ private:
             CreateControl(&videoControls_, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_NUMBER | ES_AUTOHSCROLL,
                           640, y, 275, 25, subId);
         };
-        CreateControl(&videoControls_, 0, L"STATIC", L"Разрешение", SS_CENTERIMAGE, 30, 134, 210, 25);
+        CreateControl(&videoControls_, 0, L"STATIC", UiText(L"Разрешение", L"Resolution"), SS_CENTERIMAGE, 30, 134, 210, 25);
         CreateControl(&videoControls_, WS_EX_CLIENTEDGE, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL,
                       250, 134, 360, 270, kResolution);
         CreateControl(&videoControls_, WS_EX_CLIENTEDGE, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL,
                       640, 134, 275, 200, kSubResolution);
         CreateControl(&videoControls_, 0, L"STATIC", L"", SS_CENTERIMAGE, 250, 168, 665, 25, kResolutionSource);
-        streamRow(L"Кадров в секунду", kFps, kSubFps, 202);
-        streamRow(L"Битрейт, Кбит/с", kBitrate, kSubBitrate, 236);
-        streamRow(L"Интервал ключевых кадров", kGop, kSubGop, 270);
-        CreateControl(&videoControls_, 0, L"STATIC", L"Путь RTSP", SS_CENTERIMAGE, 30, 304, 210, 25);
+        streamRow(UiText(L"Кадров в секунду", L"Frames per second"), kFps, kSubFps, 202);
+        streamRow(UiText(L"Битрейт, Кбит/с", L"Bitrate, Kbps"), kBitrate, kSubBitrate, 236);
+        streamRow(UiText(L"Интервал ключевых кадров", L"Keyframe interval"), kGop, kSubGop, 270);
+        CreateControl(&videoControls_, 0, L"STATIC", UiText(L"Путь RTSP", L"RTSP path"), SS_CENTERIMAGE, 30, 304, 210, 25);
         CreateControl(&videoControls_, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL, 250, 304, 360, 25, kRtspPath);
         CreateControl(&videoControls_, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL, 640, 304, 275, 25, kSubPath);
         CreateControl(&videoControls_, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_READONLY | ES_AUTOHSCROLL,
                       30, 355, 435, 26, kMainVideoAddress);
         CreateControl(&videoControls_, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_READONLY | ES_AUTOHSCROLL,
                       480, 355, 435, 26, kSubVideoAddress);
-        CreateControl(&videoControls_, 0, L"STATIC", L"Минимальный FPS", SS_CENTERIMAGE, 30, 408, 170, 25);
+        CreateControl(&videoControls_, 0, L"STATIC", UiText(L"Минимальный FPS", L"Minimum FPS"), SS_CENTERIMAGE, 30, 408, 170, 25);
         CreateControl(&videoControls_, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_NUMBER | ES_AUTOHSCROLL,
                       205, 408, 65, 25, kMinimumFps);
-        CreateControl(&videoControls_, 0, L"BUTTON", L"Адаптивный FPS при неподвижном экране",
+        CreateControl(&videoControls_, 0, L"BUTTON", UiText(L"Адаптивный FPS при неподвижном экране", L"Adaptive FPS when the screen is idle"),
                       BS_AUTOCHECKBOX, 290, 408, 335, 24, kAdaptiveFps);
-        CreateControl(&videoControls_, 0, L"BUTTON", L"Автоматически снижать нагрузку",
+        CreateControl(&videoControls_, 0, L"BUTTON", UiText(L"Автоматически снижать нагрузку", L"Automatically reduce load"),
                       BS_AUTOCHECKBOX, 640, 408, 280, 24, kAdaptiveLoad);
-        CreateControl(&videoControls_, 0, L"STATIC", L"Кодирование обоих потоков", SS_CENTERIMAGE, 30, 452, 220, 25);
+        CreateControl(&videoControls_, 0, L"STATIC", UiText(L"Кодирование обоих потоков", L"Both stream encoders"), SS_CENTERIMAGE, 30, 452, 220, 25);
         HWND encoder = CreateControl(&videoControls_, WS_EX_CLIENTEDGE, L"COMBOBOX", L"",
                                      CBS_DROPDOWNLIST, 250, 452, 665, 130, kEncoderPreference);
-        for (const wchar_t* item : { L"Автоматически: аппаратный, затем программный",
-                                     L"Только аппаратный", L"Предпочитать программный" })
+        for (const wchar_t* item : { UiText(L"Автоматически: аппаратный, затем программный", L"Automatic: hardware, then software"),
+                                     UiText(L"Только аппаратный", L"Hardware only"), UiText(L"Предпочитать программный", L"Prefer software") })
             SendMessageW(encoder, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
-        CreateControl(&videoControls_, 0, L"BUTTON", L"Разрешить программный H.264 как резервный вариант",
+        CreateControl(&videoControls_, 0, L"BUTTON", UiText(L"Разрешить программный H.264 как резервный вариант", L"Allow software H.264 as a fallback"),
                       BS_AUTOCHECKBOX, 250, 488, 665, 24, kAllowSoftwareEncoder);
         CreateControl(&videoControls_, 0, L"STATIC",
-                      L"Вторичный поток использует тот же экран, текст и маски. Его размеры и FPS не превышают основной поток.\n"
-                      L"При адаптивном FPS частота обоих потоков снижается на неподвижном экране. Второй кодировщик увеличивает нагрузку.",
+                       UiText(L"Вторичный поток использует тот же экран, текст и маски. Его размеры и FPS не превышают основной поток.\n"
+                              L"При адаптивном FPS частота обоих потоков снижается на неподвижном экране. Второй кодировщик увеличивает нагрузку.",
+                              L"The sub stream uses the same screen, text and masks. Its size and FPS do not exceed the main stream.\n"
+                              L"Adaptive FPS lowers both stream rates on an idle screen. A second encoder increases system load."),
                       SS_LEFT, 30, 530, 885, 45);
 
-        CreateControl(&deviceControls_, 0, L"BUTTON", L"Источник изображения", BS_GROUPBOX, 465, 50, 460, 515);
-        CreateControl(&deviceControls_, 0, L"STATIC", L"Что захватывать", SS_LEFT, 485, 80, 410, 22);
+        CreateControl(&deviceControls_, 0, L"BUTTON", UiText(L"Источник изображения", L"Image source"), BS_GROUPBOX, 465, 50, 460, 515);
+        CreateControl(&deviceControls_, 0, L"STATIC", UiText(L"Что захватывать", L"Capture source"), SS_LEFT, 485, 80, 410, 22);
         HWND sourceMode = CreateControl(&deviceControls_, WS_EX_CLIENTEDGE, L"COMBOBOX", L"",
                                         CBS_DROPDOWNLIST, 485, 106, 420, 150, kCaptureMode);
-        for (const wchar_t* item : { L"Монитор целиком", L"Прямоугольная область монитора",
-                                     L"Окно по заголовку", L"Активное окно" })
+        for (const wchar_t* item : { UiText(L"Монитор целиком", L"Entire monitor"), UiText(L"Прямоугольная область монитора", L"Rectangular monitor area"),
+                                     UiText(L"Окно по заголовку", L"Window by title"), UiText(L"Активное окно", L"Active window") })
             SendMessageW(sourceMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
-        CreateControl(&deviceControls_, 0, L"STATIC", L"Монитор", SS_LEFT, 485, 151, 410, 22);
+        CreateControl(&deviceControls_, 0, L"STATIC", UiText(L"Монитор", L"Monitor"), SS_LEFT, 485, 151, 410, 22);
         CreateControl(&deviceControls_, WS_EX_CLIENTEDGE, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL,
                       485, 177, 420, 180, kMonitorIndex);
-        CreateControl(&regionControls_, 0, L"STATIC", L"Слева, пикс.", SS_LEFT, 485, 225, 190, 22);
+        CreateControl(&regionControls_, 0, L"STATIC", UiText(L"Слева, пикс.", L"Left, px"), SS_LEFT, 485, 225, 190, 22);
         CreateControl(&regionControls_, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL,
                       485, 251, 190, 25, kRegionX);
-        CreateControl(&regionControls_, 0, L"STATIC", L"Сверху, пикс.", SS_LEFT, 715, 225, 190, 22);
+        CreateControl(&regionControls_, 0, L"STATIC", UiText(L"Сверху, пикс.", L"Top, px"), SS_LEFT, 715, 225, 190, 22);
         CreateControl(&regionControls_, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL,
                       715, 251, 190, 25, kRegionY);
-        CreateControl(&regionControls_, 0, L"STATIC", L"Ширина, пикс.", SS_LEFT, 485, 290, 190, 22);
+        CreateControl(&regionControls_, 0, L"STATIC", UiText(L"Ширина, пикс.", L"Width, px"), SS_LEFT, 485, 290, 190, 22);
         CreateControl(&regionControls_, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_NUMBER | ES_AUTOHSCROLL,
                       485, 316, 190, 25, kRegionWidth);
-        CreateControl(&regionControls_, 0, L"STATIC", L"Высота, пикс.", SS_LEFT, 715, 290, 190, 22);
+        CreateControl(&regionControls_, 0, L"STATIC", UiText(L"Высота, пикс.", L"Height, px"), SS_LEFT, 715, 290, 190, 22);
         CreateControl(&regionControls_, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_NUMBER | ES_AUTOHSCROLL,
                       715, 316, 190, 25, kRegionHeight);
-        CreateControl(&windowControls_, 0, L"STATIC", L"Часть заголовка окна", SS_LEFT, 485, 225, 410, 22);
+        CreateControl(&windowControls_, 0, L"STATIC", UiText(L"Часть заголовка окна", L"Part of the window title"), SS_LEFT, 485, 225, 410, 22);
         CreateControl(&windowControls_, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL, 485, 251, 420, 25, kWindowTitle);
         CreateControl(&deviceControls_, 0, L"STATIC", L"", SS_LEFT, 485, 366, 420, 105, kSourceHint);
-        CreateControl(&deviceControls_, 0, L"BUTTON", L"Мышь", BS_GROUPBOX, 25, 285, 420, 153);
-        CreateControl(&deviceControls_, 0, L"BUTTON", L"Показывать курсор", BS_AUTOCHECKBOX,
+        CreateControl(&deviceControls_, 0, L"BUTTON", UiText(L"Мышь", L"Mouse"), BS_GROUPBOX, 25, 285, 420, 153);
+        CreateControl(&deviceControls_, 0, L"BUTTON", UiText(L"Показывать курсор", L"Show cursor"), BS_AUTOCHECKBOX,
                       45, 307, 380, 25, kShowCursor);
-        CreateControl(&deviceControls_, 0, L"BUTTON", L"Подсвечивать каждое нажатие мыши", BS_AUTOCHECKBOX,
+        CreateControl(&deviceControls_, 0, L"BUTTON", UiText(L"Подсвечивать каждое нажатие мыши", L"Highlight every mouse click"), BS_AUTOCHECKBOX,
                       45, 337, 380, 25, kHighlightMouseClicks);
-        CreateControl(&clickControls_, 0, L"STATIC", L"Диаметр, пикс.", SS_LEFT, 45, 370, 170, 22);
+        CreateControl(&clickControls_, 0, L"STATIC", UiText(L"Диаметр, пикс.", L"Diameter, px"), SS_LEFT, 45, 370, 170, 22);
         CreateControl(&clickControls_, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_NUMBER | ES_AUTOHSCROLL,
                       45, 396, 170, 25, kMouseClickSize);
-        CreateControl(&clickControls_, 0, L"STATIC", L"Длительность, мс", SS_LEFT, 245, 370, 170, 22);
+        CreateControl(&clickControls_, 0, L"STATIC", UiText(L"Длительность, мс", L"Duration, ms"), SS_LEFT, 245, 370, 170, 22);
         CreateControl(&clickControls_, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_NUMBER | ES_AUTOHSCROLL,
                       245, 396, 170, 25, kMouseClickDuration);
-        CreateControl(&deviceControls_, 0, L"BUTTON", L"Если экран недоступен", BS_GROUPBOX, 25, 452, 420, 113);
-        CreateControl(&deviceControls_, 0, L"BUTTON", L"Передавать заставку при блокировке",
+        CreateControl(&deviceControls_, 0, L"BUTTON", UiText(L"Если экран недоступен", L"When the screen is unavailable"), BS_GROUPBOX, 25, 452, 420, 113);
+        CreateControl(&deviceControls_, 0, L"BUTTON", UiText(L"Передавать заставку при блокировке", L"Stream a standby screen while locked"),
                       BS_AUTOCHECKBOX, 45, 478, 380, 25, kStandbyEnabled);
-        CreateControl(&standbyControls_, 0, L"STATIC", L"Текст", SS_CENTERIMAGE, 45, 519, 60, 25);
+        CreateControl(&standbyControls_, 0, L"STATIC", UiText(L"Текст", L"Text"), SS_CENTERIMAGE, 45, 519, 60, 25);
         CreateControl(&standbyControls_, WS_EX_CLIENTEDGE, L"EDIT", L"", ES_AUTOHSCROLL, 115, 519, 310, 25, kStandbyText);
 
-        CreateControl(&timestampControls_, 0, L"STATIC", L"Предпросмотр", SS_LEFT, 30, 47, 560, 20);
+        CreateControl(&timestampControls_, 0, L"STATIC", UiText(L"Предпросмотр", L"Preview"), SS_LEFT, 30, 47, 560, 20);
         HWND preview = CreateControl(&timestampControls_, 0, L"STATIC", L"",
                                      SS_OWNERDRAW | SS_NOTIFY | WS_TABSTOP, 30, 70, 560, 315, kPreview);
         SetWindowSubclass(preview, PreviewProcedure, 1, reinterpret_cast<DWORD_PTR>(this));
 
-        CreateControl(&timestampControls_, 0, L"STATIC", L"Положение", SS_LEFT, 610, 47, 310, 20);
+        CreateControl(&timestampControls_, 0, L"STATIC", UiText(L"Положение", L"Position"), SS_LEFT, 610, 47, 310, 20);
         HWND position = CreateControl(&timestampControls_, WS_EX_CLIENTEDGE, L"COMBOBOX", L"",
                                       CBS_DROPDOWNLIST | WS_VSCROLL, 610, 70, 310, 180, kTextPosition);
-        for (const wchar_t* item : { L"Верхний левый угол", L"Верхний правый угол",
-                                     L"Нижний левый угол", L"Нижний правый угол" })
+        for (const wchar_t* item : { UiText(L"Верхний левый угол", L"Top left"), UiText(L"Верхний правый угол", L"Top right"),
+                                     UiText(L"Нижний левый угол", L"Bottom left"), UiText(L"Нижний правый угол", L"Bottom right") })
             SendMessageW(position, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item));
-        CreateSlider(timestampControls_, L"Отступ по горизонтали", kTimestampMarginX, kMarginXValue, 610, 120, 310);
-        CreateSlider(timestampControls_, L"Отступ по вертикали", kTimestampMarginY, kMarginYValue, 610, 172, 310);
-        CreateSlider(timestampControls_, L"Подложка по горизонтали", kTimestampPaddingX, kPaddingXValue, 610, 224, 310);
-        CreateSlider(timestampControls_, L"Подложка по вертикали", kTimestampPaddingY, kPaddingYValue, 610, 276, 310);
-        CreateSlider(timestampControls_, L"Непрозрачность, %", kTimestampOpacity, kOpacityValue, 610, 328, 310);
+        CreateSlider(timestampControls_, UiText(L"Отступ по горизонтали", L"Horizontal margin"), kTimestampMarginX, kMarginXValue, 610, 120, 310);
+        CreateSlider(timestampControls_, UiText(L"Отступ по вертикали", L"Vertical margin"), kTimestampMarginY, kMarginYValue, 610, 172, 310);
+        CreateSlider(timestampControls_, UiText(L"Подложка по горизонтали", L"Horizontal padding"), kTimestampPaddingX, kPaddingXValue, 610, 224, 310);
+        CreateSlider(timestampControls_, UiText(L"Подложка по вертикали", L"Vertical padding"), kTimestampPaddingY, kPaddingYValue, 610, 276, 310);
+        CreateSlider(timestampControls_, UiText(L"Непрозрачность, %", L"Opacity, %"), kTimestampOpacity, kOpacityValue, 610, 328, 310);
 
-        CreateControl(&timestampControls_, 0, L"STATIC", L"Шаблон:", SS_CENTERIMAGE, 30, 400, 60, 24);
+        CreateControl(&timestampControls_, 0, L"STATIC", UiText(L"Шаблон:", L"Template:"), SS_CENTERIMAGE, 30, 400, 60, 24);
         LOGFONTW linkFont{};
         GetObjectW(uiFont_, sizeof(linkFont), &linkFont);
         linkFont.lfUnderline = TRUE;
@@ -762,42 +781,47 @@ private:
         HWND templateEdit = CreateControl(&timestampControls_, WS_EX_CLIENTEDGE, L"EDIT", L"",
             ES_AUTOHSCROLL, 30, 430, 755, 28, kOverlayTemplate);
         SendMessageW(templateEdit, EM_SETLIMITTEXT, 2000, 0);
-        CreateControl(&timestampControls_, 0, L"BUTTON", L"Шрифт", BS_PUSHBUTTON,
+        CreateControl(&timestampControls_, 0, L"BUTTON", UiText(L"Шрифт", L"Font"), BS_PUSHBUTTON,
                       800, 429, 120, 30, kChooseFont);
 
-        CreateControl(&timestampControls_, 0, L"BUTTON", L"Скрываемые области",
+        CreateControl(&timestampControls_, 0, L"BUTTON", UiText(L"Скрываемые области", L"Privacy masks"),
                       BS_GROUPBOX, 25, 478, 900, 104);
         CreateControl(&timestampControls_, WS_EX_CLIENTEDGE, L"LISTBOX", L"",
                       LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL, 40, 500, 550, 65, kMaskList);
-        CreateControl(&timestampControls_, 0, L"BUTTON", L"Добавить", BS_PUSHBUTTON, 610, 500, 145, 30, kAddMask);
-        CreateControl(&timestampControls_, 0, L"BUTTON", L"Удалить", BS_PUSHBUTTON, 770, 500, 145, 30, kDeleteMask);
-        CreateControl(&timestampControls_, 0, L"BUTTON", L"Удалить все", BS_PUSHBUTTON, 610, 535, 305, 30, kClearMasks);
+        CreateControl(&timestampControls_, 0, L"BUTTON", UiText(L"Добавить", L"Add"), BS_PUSHBUTTON, 610, 500, 145, 30, kAddMask);
+        CreateControl(&timestampControls_, 0, L"BUTTON", UiText(L"Удалить", L"Delete"), BS_PUSHBUTTON, 770, 500, 145, 30, kDeleteMask);
+        CreateControl(&timestampControls_, 0, L"BUTTON", UiText(L"Удалить все", L"Delete all"), BS_PUSHBUTTON, 610, 535, 305, 30, kClearMasks);
 
-        CreateControl(&securityControls_, 0, L"BUTTON", L"Требовать имя пользователя и пароль для RTSP и ONVIF",
+        CreateControl(&securityControls_, 0, L"BUTTON", UiText(L"Требовать имя пользователя и пароль для RTSP и ONVIF", L"Require a username and password for RTSP and ONVIF"),
                       BS_AUTOCHECKBOX, 30, 60, 590, 25, kAuthentication);
-        CreateLabeledEdit(securityControls_, L"Имя пользователя", kUserName, 105);
-        CreateLabeledEdit(securityControls_, L"Пароль", kPassword, 145, ES_PASSWORD | ES_AUTOHSCROLL);
-        CreateLabeledEdit(securityControls_, L"Разрешённые IP", kAllowedIps, 205);
+        CreateLabeledEdit(securityControls_, UiText(L"Имя пользователя", L"Username"), kUserName, 105);
+        CreateLabeledEdit(securityControls_, UiText(L"Пароль", L"Password"), kPassword, 145, ES_PASSWORD | ES_AUTOHSCROLL);
+        CreateLabeledEdit(securityControls_, UiText(L"Разрешённые IP", L"Allowed IP addresses"), kAllowedIps, 205);
         CreateControl(&securityControls_, 0, L"STATIC",
-                      L"Укажите IP через запятую. Пустое поле разрешает все адреса. Локальная проверка 127.0.0.1 разрешена всегда.\n"
-                      L"RTSP: Basic/Digest. ONVIF: Basic/Digest и UsernameToken.\n"
-                      L"Для PasswordDigest часы компьютера и клиента должны быть синхронизированы.",
+                       UiText(L"Укажите IP через запятую. Пустое поле разрешает все адреса. Локальная проверка 127.0.0.1 разрешена всегда.\n"
+                              L"RTSP: Basic/Digest. ONVIF: Basic/Digest и UsernameToken.\n"
+                              L"Для PasswordDigest часы компьютера и клиента должны быть синхронизированы.",
+                              L"Separate IP addresses with commas. An empty field allows all addresses. Local probe 127.0.0.1 is always allowed.\n"
+                              L"RTSP: Basic/Digest. ONVIF: Basic/Digest and UsernameToken.\n"
+                              L"The computer and client clocks must be synchronized for PasswordDigest."),
                       SS_LEFT, 30, 245, 870, 100);
 
-        CreateControl(&statusControls_, WS_EX_CLIENTEDGE, L"STATIC", L"Запуск...",
+        CreateControl(&statusControls_, WS_EX_CLIENTEDGE, L"STATIC", UiText(L"Запуск...", L"Starting..."),
                       SS_LEFT, 30, 60, 885, 415, kStatusText);
         CreateControl(&statusControls_, 0, L"STATIC",
-                      L"Устройство определяется по IP. Несколько потоков с одного IP считаются одним устройством.\n"
-                      L"Данные обновляются автоматически. Встроенная проверка RTSP в счётчики не включается.",
+                       UiText(L"Устройство определяется по IP. Несколько потоков с одного IP считаются одним устройством.\n"
+                              L"Данные обновляются автоматически. Встроенная проверка RTSP в счётчики не включается.",
+                              L"A device is identified by IP. Multiple streams from one IP count as one device.\n"
+                              L"Data updates automatically. The built-in RTSP probe is excluded from the counters."),
                       SS_LEFT, 30, 495, 885, 35);
-        CreateControl(&statusControls_, 0, L"BUTTON", L"Вести журнал в файл", BS_AUTOCHECKBOX,
+        CreateControl(&statusControls_, 0, L"BUTTON", UiText(L"Вести журнал в файл", L"Write log to a file"), BS_AUTOCHECKBOX,
                       30, 539, 265, 25, kLoggingEnabled);
-        CreateControl(&statusControls_, 0, L"STATIC", L"До 2 МБ. Применяется без перезапуска после сохранения.",
+        CreateControl(&statusControls_, 0, L"STATIC", UiText(L"До 2 МБ. Применяется без перезапуска после сохранения.", L"Up to 2 MB. Applied without restart after saving."),
                       SS_CENTERIMAGE, 310, 539, 605, 25);
 
-        CreateControl(nullptr, 0, L"BUTTON", L"Сохранить", BS_DEFPUSHBUTTON,
+        CreateControl(nullptr, 0, L"BUTTON", UiText(L"Сохранить", L"Save"), BS_DEFPUSHBUTTON,
                       720, 602, 105, 30, kSave);
-        CreateControl(nullptr, 0, L"BUTTON", L"Отмена", BS_PUSHBUTTON,
+        CreateControl(nullptr, 0, L"BUTTON", UiText(L"Отмена", L"Cancel"), BS_PUSHBUTTON,
                       835, 602, 105, 30, kCancel);
         // The tab and group boxes are sibling backgrounds, not parents of their contents.
         // Keep them behind controls so WS_CLIPSIBLINGS excludes fields from background painting.
@@ -810,8 +834,34 @@ private:
                     SetWindowPos(control, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             }
         SetWindowPos(tab_, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        TabCtrl_SetCurSel(tab_, selectedTab_);
         PopulateControls();
         ShowSelectedTab();
+    }
+
+    void RebuildLocalizedControls()
+    {
+        // Recreate only the hidden settings controls. List items and dynamically
+        // generated captions then use the new language without restarting capture.
+        status_.previewRequested = false;
+        populatingControls_ = true;
+        for (HWND child = GetWindow(window_, GW_CHILD); child; )
+        {
+            HWND next = GetWindow(child, GW_HWNDNEXT);
+            DestroyWindow(child);
+            child = next;
+        }
+        deviceControls_.clear(); videoControls_.clear(); timestampControls_.clear();
+        securityControls_.clear(); statusControls_.clear(); regionControls_.clear();
+        windowControls_.clear(); clickControls_.clear(); standbyControls_.clear();
+        if (ownsUiFont_) DeleteObject(uiFont_);
+        if (linkFont_) DeleteObject(linkFont_);
+        uiFont_ = nullptr; linkFont_ = nullptr; ownsUiFont_ = false;
+        draggingText_ = false; draggingMask_ = false; addingMask_ = false;
+        textSelected_ = false; textBoundsValid_ = false;
+        SetWindowTextW(window_, UiText(L"Настройки Screen2NVR", L"Screen2NVR Settings"));
+        CreateControls(window_);
+        UpdateStatusDisplay();
     }
 
     void SetSliderRange(int id, int minimum, int maximum, int value)
@@ -853,6 +903,7 @@ private:
         if (!window_) return;
         populatingControls_ = true;
         draftSettings_ = settings_;
+        SendDlgItemMessageW(window_, kLanguage, CB_SETCURSEL, settings_.uiLanguage, 0);
         mainResolutions_.clear(); subResolutions_.clear();
         SetDlgItemTextW(window_, kCameraName, settings_.cameraName.c_str());
         SetDlgItemInt(window_, kOnvifPort, settings_.onvifPort, FALSE);
@@ -930,7 +981,7 @@ private:
                     DXGI_OUTPUT_DESC desc{};
                     if (FAILED(output->GetDesc(&desc)) || !desc.AttachedToDesktop) continue;
                     monitorRectangles_.push_back(desc.DesktopCoordinates);
-                    const std::wstring name = L"Монитор " + std::to_wstring(index + 1) + L" — " + desc.DeviceName +
+                    const std::wstring name = UiText(L"Монитор ", L"Monitor ") + std::to_wstring(index + 1) + L" — " + desc.DeviceName +
                         L"  (" + std::to_wstring(desc.DesktopCoordinates.right - desc.DesktopCoordinates.left) + L" × " +
                         std::to_wstring(desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top) + L")";
                     const LRESULT item = SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name.c_str()));
@@ -942,7 +993,8 @@ private:
         }
         if (selectedMonitor >= index)
         {
-            const std::wstring name = L"Монитор " + std::to_wstring(selectedMonitor + 1) + L" — сейчас не подключён";
+            const std::wstring name = UiText(L"Монитор ", L"Monitor ") + std::to_wstring(selectedMonitor + 1) +
+                UiText(L" — сейчас не подключён", L" — currently disconnected");
             const LRESULT item = SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name.c_str()));
             SendMessageW(combo, CB_SETITEMDATA, item, selectedMonitor);
             SendMessageW(combo, CB_SETCURSEL, item, 0);
@@ -959,10 +1011,14 @@ private:
         show(clickControls_, selectedTab_ == kDeviceTab && IsDlgButtonChecked(window_, kHighlightMouseClicks) == BST_CHECKED);
         show(standbyControls_, selectedTab_ == kDeviceTab && IsDlgButtonChecked(window_, kStandbyEnabled) == BST_CHECKED);
         const wchar_t* hint = mode == 1
-            ? L"Положение и размер прямоугольника задаются в пикселях выбранного монитора.\nНачало координат — его верхний левый угол."
-            : mode == 2 ? L"Укажите узнаваемую часть названия окна. Захватывается его видимая область на выбранном мониторе.\nПерекрывающие окна тоже попадут в кадр."
-            : mode == 3 ? L"Захватывается видимая область активного окна в пределах выбранного монитора.\nПри переключении приложений источник будет меняться."
-            : L"В кадр попадает весь выбранный монитор.\nТекст и скрываемые области можно настроить на вкладке «Наложение».";
+            ? UiText(L"Положение и размер прямоугольника задаются в пикселях выбранного монитора.\nНачало координат — его верхний левый угол.",
+                     L"Set the rectangle position and size in pixels of the selected monitor.\nThe origin is its top-left corner.")
+            : mode == 2 ? UiText(L"Укажите узнаваемую часть названия окна. Захватывается его видимая область на выбранном мониторе.\nПерекрывающие окна тоже попадут в кадр.",
+                                 L"Enter a recognizable part of the window title. Its visible area on the selected monitor is captured.\nOverlapping windows are included.")
+            : mode == 3 ? UiText(L"Захватывается видимая область активного окна в пределах выбранного монитора.\nПри переключении приложений источник будет меняться.",
+                                 L"The visible area of the active window on the selected monitor is captured.\nThe source changes when you switch applications.")
+            : UiText(L"В кадр попадает весь выбранный монитор.\nТекст и скрываемые области можно настроить на вкладке «Наложение».",
+                     L"The entire selected monitor is captured.\nConfigure text and privacy masks on the Overlay tab.");
         SetDlgItemTextW(window_, kSourceHint, hint);
         const int hintY = mode == 1 ? 366 : mode == 2 ? 301 : 225;
         constexpr UINT layoutFlags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW | SWP_NOCOPYBITS;
@@ -1028,8 +1084,8 @@ private:
         {
             const auto& size = choices[i];
             std::wstring label = std::to_wstring(size.width) + L" × " + std::to_wstring(size.height);
-            if (legacy && i + 1 == choices.size()) label += L" — выбрано ранее";
-            else if (id == kResolution && size.width == (resolutionSource_.width & ~1U)) label += L" — исходное";
+            if (legacy && i + 1 == choices.size()) label += UiText(L" — выбрано ранее", L" — previously selected");
+            else if (id == kResolution && size.width == (resolutionSource_.width & ~1U)) label += UiText(L" — исходное", L" — source");
             SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
             const uint64_t distance = size.width > preferred.width ? size.width - preferred.width : preferred.width - size.width;
             if (size == preferred) { selected = i; closest = 0; }
@@ -1063,9 +1119,11 @@ private:
         FillResolutions(kResolution, mainResolutions_, preferred, keepCurrent);
         RefreshSubResolutions(keepCurrent);
         const std::wstring description = source.width && source.height
-            ? L"Область захвата: " + std::to_wstring(source.width) + L" × " + std::to_wstring(source.height) +
-                L" пикс. · размеры потоков с теми же пропорциями"
-            : L"Размер области недоступен — проверьте источник на вкладке «Устройство».";
+            ? UiText(L"Область захвата: ", L"Capture area: ") + std::to_wstring(source.width) + L" × " +
+                std::to_wstring(source.height) + UiText(L" пикс. · размеры потоков с теми же пропорциями",
+                                                        L" px · stream sizes use the same aspect ratio")
+            : UiText(L"Размер области недоступен — проверьте источник на вкладке «Устройство».",
+                     L"Capture area size is unavailable — check the source on the Device tab.");
         SetDlgItemTextW(window_, kResolutionSource, description.c_str());
     }
 
@@ -1085,7 +1143,7 @@ private:
     {
         SetDlgItemTextW(window_, kMainVideoAddress, RtspAddress(true).c_str());
         SetDlgItemTextW(window_, kSubVideoAddress, IsDlgButtonChecked(window_, kSubEnabled) == BST_CHECKED ?
-                        RtspAddress(true, true).c_str() : L"Вторичный поток выключен");
+                        RtspAddress(true, true).c_str() : UiText(L"Вторичный поток выключен", L"Sub stream disabled"));
     }
 
     void UpdateSubStreamControls()
@@ -1098,7 +1156,7 @@ private:
 
     void UpdateMaskButtons()
     {
-        SetDlgItemTextW(window_, kAddMask, addingMask_ ? L"Отменить" : L"Добавить");
+        SetDlgItemTextW(window_, kAddMask, addingMask_ ? UiText(L"Отменить", L"Cancel") : UiText(L"Добавить", L"Add"));
         EnableWindow(GetDlgItem(window_, kAddMask), masks_.size() < 32);
         EnableWindow(GetDlgItem(window_, kDeleteMask), selectedMask_ >= 0);
         EnableWindow(GetDlgItem(window_, kClearMasks), !masks_.empty());
@@ -1110,8 +1168,8 @@ private:
         for (size_t i = 0; i < masks_.size(); ++i)
         {
             const auto& m = masks_[i];
-            const std::wstring label = L"Область " + std::to_wstring(i + 1) + L"   " +
-                std::to_wstring(m.width) + L" × " + std::to_wstring(m.height) + L" пикс.   (" +
+            const std::wstring label = UiText(L"Область ", L"Area ") + std::to_wstring(i + 1) + L"   " +
+                std::to_wstring(m.width) + L" × " + std::to_wstring(m.height) + UiText(L" пикс.   (", L" px   (") +
                 std::to_wstring(m.x) + L", " + std::to_wstring(m.y) + L")";
             SendDlgItemMessageW(window_, kMaskList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
         }
@@ -1193,7 +1251,13 @@ private:
                        CF_LIMITSIZE | CF_NOVERTFONTS;
         choice.nSizeMin = 6;
         choice.nSizeMax = 96;
-        if (!ChooseFontW(&choice)) return;
+        // Windows common dialogs use the calling thread's resource language.
+        const LANGID previousLanguage = GetThreadUILanguage();
+        SetThreadUILanguage(MAKELANGID(IsEnglishUi() ? LANG_ENGLISH : LANG_RUSSIAN,
+                                      IsEnglishUi() ? SUBLANG_ENGLISH_US : SUBLANG_DEFAULT));
+        const BOOL selected = ChooseFontW(&choice);
+        SetThreadUILanguage(previousLanguage);
+        if (!selected) return;
 
         draftSettings_.timestampFontName = font.lfFaceName;
         draftSettings_.timestampFontWeight = std::clamp<uint32_t>(font.lfWeight, 100, 900);
@@ -1454,7 +1518,8 @@ private:
                 if (SUCCEEDED(previewWriteFactory_->CreateTextFormat(textSettings.timestampFontName.c_str(), nullptr,
                     static_cast<DWRITE_FONT_WEIGHT>(textSettings.timestampFontWeight),
                     textSettings.timestampFontItalic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
-                    DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(textSettings.timestampFontSize), L"ru-RU", &format)) &&
+                    DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(textSettings.timestampFontSize),
+                    IsEnglishUi() ? L"en-US" : L"ru-RU", &format)) &&
                     SUCCEEDED(format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)) &&
                     SUCCEEDED(previewWriteFactory_->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()),
                         format.Get(), std::max(1.0f, static_cast<float>(textSettings.outputWidth) -
@@ -1500,14 +1565,16 @@ private:
             previewTarget_->SetTransform(D2D1::Matrix3x2F::Identity());
         }
         const bool stale = frameTick != 0 && GetTickCount64() - frameTick > 3000;
-        const wchar_t* message = standby ? L"Экран недоступен — передаётся заставка" :
-            status_.streamingPaused.load() ? L"Трансляция приостановлена" :
-            status_.finished.load() ? L"Захват остановлен" :
-            !hasFrame ? L"Ожидание кадра текущей трансляции…" :
-            stale ? L"Кадр не обновляется" : L"Живой захват · текст и маски — черновик";
+        const wchar_t* message = standby ? UiText(L"Экран недоступен — передаётся заставка", L"Screen unavailable — streaming standby image") :
+            status_.streamingPaused.load() ? UiText(L"Трансляция приостановлена", L"Streaming paused") :
+            status_.finished.load() ? UiText(L"Захват остановлен", L"Capture stopped") :
+            !hasFrame ? UiText(L"Ожидание кадра текущей трансляции…", L"Waiting for a frame from the current stream…") :
+            stale ? UiText(L"Кадр не обновляется", L"Frame is not updating") :
+                    UiText(L"Живой захват · текст и маски — черновик", L"Live capture · text and masks are a draft");
         ComPtr<IDWriteTextFormat> statusFormat;
         if (SUCCEEDED(previewWriteFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0f, L"ru-RU", &statusFormat)))
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0f,
+            IsEnglishUi() ? L"en-US" : L"ru-RU", &statusFormat)))
         {
             brush->SetColor(D2D1::ColorF(0.85f, 0.89f, 0.94f));
             const float bottom = rect.top >= 24 ? static_cast<float>(rect.top) : 28.0f;
@@ -1571,40 +1638,51 @@ private:
         const uint64_t uptimeSeconds = now >= started ? (now - started) / 1000 : 0;
         const auto phase = static_cast<PipelinePhase>(status_.phase.load());
         const bool paused = status_.streamingPaused.load();
-        std::wstring phaseText = paused ? L"Остановлена пользователем" :
-            phase == PipelinePhase::starting ? L"Запуск" :
-            phase == PipelinePhase::servicesReady ? L"RTSP и ONVIF запущены" :
-            phase == PipelinePhase::captureReady ? L"Захват экрана запущен" :
-            phase == PipelinePhase::encoderReady ? L"Ожидание первого H.264-кадра" : L"Трансляция работает";
+        std::wstring phaseText = paused ? UiText(L"Остановлена пользователем", L"Stopped by user") :
+            phase == PipelinePhase::starting ? UiText(L"Запуск", L"Starting") :
+            phase == PipelinePhase::servicesReady ? UiText(L"RTSP и ONVIF запущены", L"RTSP and ONVIF started") :
+            phase == PipelinePhase::captureReady ? UiText(L"Захват экрана запущен", L"Screen capture started") :
+            phase == PipelinePhase::encoderReady ? UiText(L"Ожидание первого H.264-кадра", L"Waiting for the first H.264 frame") :
+                                                   UiText(L"Трансляция работает", L"Streaming");
         std::wstring adapter, monitor, encoder, encoderKind, source, error;
         uint32_t devices = 0, mainSessions = 0, subSessions = 0;
         {
             std::lock_guard<std::mutex> lock(status_.mutex);
             adapter = status_.adapterName; monitor = status_.monitorName;
-            encoder = status_.encoderName; encoderKind = status_.encoderKind;
-            source = status_.sourceDescription; error = status_.error;
+            encoder = status_.encoderName;
+            encoderKind = status_.encoderKind.empty() ? L"" : status_.encoderKind == L"Hardware"
+                ? UiText(L"Аппаратный", L"Hardware") : UiText(L"Программный (повышенная нагрузка CPU)", L"Software (increased CPU load)");
+            source = activeSettings_.captureMode == 0 ? UiText(L"Монитор целиком", L"Entire monitor") :
+                activeSettings_.captureMode == 1 ? UiText(L"Область монитора", L"Monitor region") :
+                activeSettings_.captureMode == 2 ? UiText(L"Окно по заголовку", L"Window by title") :
+                                                 UiText(L"Активное окно", L"Active window");
+            error = status_.error;
             devices = status_.connectedDevices; mainSessions = status_.mainRtspSessions; subSessions = status_.subRtspSessions;
         }
         const uint64_t bytes = status_.publishedBytes.load();
+        const std::wstring off = UiText(L"выключен", L"disabled");
+        const std::wstring ok = UiText(L"успешно", L"successful");
+        const std::wstring waiting = UiText(L"ожидание", L"waiting");
         const std::wstring text =
-            L"Состояние: " + phaseText + L"\r\n"
-            L"Время работы: " + std::to_wstring(uptimeSeconds / 3600) + L" ч " +
-                std::to_wstring((uptimeSeconds / 60) % 60) + L" мин\r\n\r\n"
-            L"Источник: " + source + L"\r\nМонитор: " + monitor + L"\r\nGPU: " + adapter +
-            L"\r\nКодировщик: " + encoder + L" — " + encoderKind + L"\r\n\r\n"
-            L"Фактический FPS: " + std::to_wstring(status_.effectiveFrameRate.load()) +
-            L"\r\nБитрейт: " + std::to_wstring(status_.effectiveBitrateKbps.load()) + L" Кбит/с\r\n"
-            L"Опубликовано кадров: " + std::to_wstring(status_.publishedFrames.load()) +
-            L"\r\nПередано H.264: " + std::to_wstring(bytes / 1024) + L" КиБ\r\n"
-            L"Подключено устройств (по IP): " + std::to_wstring(devices) +
-            L"\r\nRTSP-сессии основного потока: " + std::to_wstring(mainSessions) +
-            L"\r\nRTSP-сессии вторичного потока: " + (status_.subStreamEnabled ? std::to_wstring(subSessions) : std::wstring(L"выключен")) +
-            L"\r\nЛокальная проверка RTSP: " +
-                (status_.rtspProbeHeartbeatMs.load() ? L"успешно" : L"ожидание") +
-            L"\r\nВторичный поток: " + (status_.subStreamEnabled ?
-                std::to_wstring(status_.subPublishedFrames.load()) + L" кадров; RTSP: " +
-                    (status_.subRtspProbeHeartbeatMs.load() ? L"успешно" : L"ожидание") : std::wstring(L"выключен")) +
-            (error.empty() ? L"" : L"\r\n\r\nПоследняя ошибка: " + error);
+            UiText(L"Состояние: ", L"Status: ") + phaseText + L"\r\n" +
+            UiText(L"Время работы: ", L"Uptime: ") + std::to_wstring(uptimeSeconds / 3600) + UiText(L" ч ", L" h ") +
+                std::to_wstring((uptimeSeconds / 60) % 60) + UiText(L" мин\r\n\r\n", L" min\r\n\r\n") +
+            UiText(L"Источник: ", L"Source: ") + source + UiText(L"\r\nМонитор: ", L"\r\nMonitor: ") + monitor + L"\r\nGPU: " + adapter +
+            UiText(L"\r\nКодировщик: ", L"\r\nEncoder: ") + encoder + L" — " + encoderKind + L"\r\n\r\n" +
+            UiText(L"Фактический FPS: ", L"Actual FPS: ") + std::to_wstring(status_.effectiveFrameRate.load()) +
+            UiText(L"\r\nБитрейт: ", L"\r\nBitrate: ") + std::to_wstring(status_.effectiveBitrateKbps.load()) + UiText(L" Кбит/с\r\n", L" Kbps\r\n") +
+            UiText(L"Опубликовано кадров: ", L"Published frames: ") + std::to_wstring(status_.publishedFrames.load()) +
+            UiText(L"\r\nПередано H.264: ", L"\r\nH.264 transferred: ") + std::to_wstring(bytes / 1024) + UiText(L" КиБ\r\n", L" KiB\r\n") +
+            UiText(L"Подключено устройств (по IP): ", L"Connected devices (by IP): ") + std::to_wstring(devices) +
+            UiText(L"\r\nRTSP-сессии основного потока: ", L"\r\nMain-stream RTSP sessions: ") + std::to_wstring(mainSessions) +
+            UiText(L"\r\nRTSP-сессии вторичного потока: ", L"\r\nSub-stream RTSP sessions: ") +
+                (status_.subStreamEnabled ? std::to_wstring(subSessions) : off) +
+            UiText(L"\r\nЛокальная проверка RTSP: ", L"\r\nLocal RTSP probe: ") +
+                (status_.rtspProbeHeartbeatMs.load() ? ok : waiting) +
+            UiText(L"\r\nВторичный поток: ", L"\r\nSub stream: ") + (status_.subStreamEnabled ?
+                std::to_wstring(status_.subPublishedFrames.load()) + UiText(L" кадров; RTSP: ", L" frames; RTSP: ") +
+                    (status_.subRtspProbeHeartbeatMs.load() ? ok : waiting) : off) +
+            (error.empty() ? L"" : UiText(L"\r\n\r\nПоследняя ошибка: ", L"\r\n\r\nLast error: ") + error);
         SetDlgItemTextW(window_, kStatusText, text.c_str());
 
         const COLORREF color = paused ? RGB(128, 128, 128) : status_.finished.load() ? RGB(210, 40, 40) :
@@ -1665,7 +1743,7 @@ private:
         tray_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         tray_.uCallbackMessage = kTrayMessage;
         tray_.hIcon = LoadApplicationIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
-        wcscpy_s(tray_.szTip, L"Screen2NVR — трансляция экрана");
+        wcscpy_s(tray_.szTip, UiText(L"Screen2NVR — трансляция экрана", L"Screen2NVR — screen streaming"));
         Shell_NotifyIconW(NIM_ADD, &tray_);
         tray_.uVersion = NOTIFYICON_VERSION_4;
         Shell_NotifyIconW(NIM_SETVERSION, &tray_);
@@ -1682,15 +1760,16 @@ private:
     {
         RememberForegroundWindow();
         HMENU menu = CreatePopupMenu();
-        AppendMenuW(menu, MF_STRING, kMenuToggleStream,
-                    status_.streamingPaused.load() ? L"Запустить трансляцию" : L"Остановить трансляцию");
-        AppendMenuW(menu, MF_STRING, kMenuRestart, L"Перезапустить трансляцию");
-        AppendMenuW(menu, MF_STRING, kMenuCopyRtsp, L"Скопировать RTSP-адрес");
-        AppendMenuW(menu, MF_STRING, kMenuOpenLog, L"Открыть папку журналов");
+        AppendMenuW(menu, MF_STRING, kMenuToggleStream, status_.streamingPaused.load()
+                    ? UiText(L"Запустить трансляцию", L"Start streaming")
+                    : UiText(L"Остановить трансляцию", L"Stop streaming"));
+        AppendMenuW(menu, MF_STRING, kMenuRestart, UiText(L"Перезапустить трансляцию", L"Restart streaming"));
+        AppendMenuW(menu, MF_STRING, kMenuCopyRtsp, UiText(L"Скопировать RTSP-адрес", L"Copy RTSP address"));
+        AppendMenuW(menu, MF_STRING, kMenuOpenLog, UiText(L"Открыть папку журналов", L"Open log folder"));
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, kMenuSettings, L"Настройки...");
+        AppendMenuW(menu, MF_STRING, kMenuSettings, UiText(L"Настройки...", L"Settings..."));
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, kMenuExit, L"Выход");
+        AppendMenuW(menu, MF_STRING, kMenuExit, UiText(L"Выход", L"Exit"));
         POINT point{};
         GetCursorPos(&point);
         SetForegroundWindow(window_);
@@ -1726,8 +1805,9 @@ private:
         const UINT value = GetDlgItemInt(window_, id, &valid, FALSE);
         if (!valid || value < minimum || value > maximum)
         {
-            const std::wstring message = std::wstring(L"Недопустимое значение поля «") + fieldName + L"».";
-            MessageBoxW(window_, message.c_str(), L"Настройки Screen2NVR", MB_OK | MB_ICONWARNING);
+            const std::wstring message = UiText(L"Недопустимое значение поля «", L"Invalid value in the ‘") +
+                std::wstring(fieldName) + UiText(L"».", L"’ field.");
+            MessageBoxW(window_, message.c_str(), UiText(L"Настройки Screen2NVR", L"Screen2NVR Settings"), MB_OK | MB_ICONWARNING);
             SetFocus(GetDlgItem(window_, id));
             return false;
         }
@@ -1749,8 +1829,9 @@ private:
         }
         catch (...)
         {
-            const std::wstring message = std::wstring(L"Недопустимое значение поля «") + fieldName + L"».";
-            MessageBoxW(window_, message.c_str(), L"Настройки Screen2NVR", MB_OK | MB_ICONWARNING);
+            const std::wstring message = UiText(L"Недопустимое значение поля «", L"Invalid value in the ‘") +
+                std::wstring(fieldName) + UiText(L"».", L"’ field.");
+            MessageBoxW(window_, message.c_str(), UiText(L"Настройки Screen2NVR", L"Screen2NVR Settings"), MB_OK | MB_ICONWARNING);
             SetFocus(GetDlgItem(window_, id));
             return false;
         }
@@ -1762,6 +1843,8 @@ private:
         RefreshResolutionChoices(false, false);
         PreparePreviewDimensions();
         AppSettings updated = draftSettings_;
+        const LRESULT selectedLanguage = SendDlgItemMessageW(window_, kLanguage, CB_GETCURSEL, 0, 0);
+        updated.uiLanguage = selectedLanguage == 1 ? 1U : 0U;
         updated.cameraName = GetText(kCameraName);
         updated.rtspPath = GetText(kRtspPath);
         updated.captureWindowTitle = GetText(kWindowTitle);
@@ -1773,52 +1856,58 @@ private:
         updated.allowedIpAddresses = GetText(kAllowedIps);
         if (!Security::NormalizeIpList(updated.allowedIpAddresses, updated.allowedIpAddresses))
         {
-            MessageBoxW(window_, L"Укажите корректные IPv4-адреса через запятую, например: 192.168.1.10, 192.168.1.20.",
-                        L"Разрешённые IP", MB_OK | MB_ICONWARNING);
+            MessageBoxW(window_, UiText(L"Укажите корректные IPv4-адреса через запятую, например: 192.168.1.10, 192.168.1.20.",
+                                        L"Enter valid IPv4 addresses separated by commas, for example: 192.168.1.10, 192.168.1.20."),
+                        UiText(L"Разрешённые IP", L"Allowed IP addresses"), MB_OK | MB_ICONWARNING);
             return;
         }
         if (updated.userName.find_first_of(L":\r\n") != std::wstring::npos)
         {
-            MessageBoxW(window_, L"Имя пользователя не должно содержать двоеточие или перевод строки.",
-                        L"Имя пользователя", MB_OK | MB_ICONWARNING);
+            MessageBoxW(window_, UiText(L"Имя пользователя не должно содержать двоеточие или перевод строки.",
+                                        L"The username must not contain a colon or a line break."),
+                        UiText(L"Имя пользователя", L"Username"), MB_OK | MB_ICONWARNING);
             return;
         }
         uint32_t value = 0;
-        if (!ReadNumber(kOnvifPort, 1, 65535, value, L"Порт ONVIF")) return;
+        if (!ReadNumber(kOnvifPort, 1, 65535, value, UiText(L"Порт ONVIF", L"ONVIF port"))) return;
         updated.onvifPort = static_cast<uint16_t>(value);
-        if (!ReadNumber(kRtspPort, 1, 65535, value, L"Порт RTSP")) return;
+        if (!ReadNumber(kRtspPort, 1, 65535, value, UiText(L"Порт RTSP", L"RTSP port"))) return;
         updated.rtspPort = static_cast<uint16_t>(value);
         const auto mainSize = SelectedResolution(false), subSize = SelectedResolution(true);
         if (!mainSize.width || !mainSize.height)
         {
-            MessageBoxW(window_, L"Для области захвата нет подходящего разрешения. Проверьте её размеры и положение.",
-                        L"Настройки Screen2NVR", MB_OK | MB_ICONWARNING);
+            MessageBoxW(window_, UiText(L"Для области захвата нет подходящего разрешения. Проверьте её размеры и положение.",
+                                        L"No suitable resolution is available for the capture area. Check its size and position."),
+                        UiText(L"Настройки Screen2NVR", L"Screen2NVR Settings"), MB_OK | MB_ICONWARNING);
             return;
         }
         updated.outputWidth = mainSize.width; updated.outputHeight = mainSize.height;
-        if (!ReadNumber(kFps, 1, 60, updated.frameRate, L"Кадров в секунду")) return;
-        if (!ReadNumber(kBitrate, 128, 50000, updated.bitrateKbps, L"Битрейт")) return;
-        if (!ReadNumber(kGop, 1, 600, updated.gopSize, L"Интервал ключевых кадров")) return;
+        if (!ReadNumber(kFps, 1, 60, updated.frameRate, UiText(L"Кадров в секунду", L"Frames per second"))) return;
+        if (!ReadNumber(kBitrate, 128, 50000, updated.bitrateKbps, UiText(L"Битрейт", L"Bitrate"))) return;
+        if (!ReadNumber(kGop, 1, 600, updated.gopSize, UiText(L"Интервал ключевых кадров", L"Keyframe interval"))) return;
         updated.subStreamEnabled = IsDlgButtonChecked(window_, kSubEnabled) == BST_CHECKED;
         if (updated.subStreamEnabled)
         {
             if (!subSize.width || !subSize.height || subSize.width > mainSize.width || subSize.height > mainSize.height)
             {
-                MessageBoxW(window_, L"Выберите разрешение вторичного потока не больше основного.",
-                            L"Вторичный поток", MB_OK | MB_ICONWARNING);
+                MessageBoxW(window_, UiText(L"Выберите разрешение вторичного потока не больше основного.",
+                                            L"Select a sub-stream resolution no larger than the main stream."),
+                            UiText(L"Вторичный поток", L"Sub stream"), MB_OK | MB_ICONWARNING);
                 return;
             }
             updated.subWidth = subSize.width; updated.subHeight = subSize.height;
-            if (!ReadNumber(kSubFps, 1, updated.frameRate, updated.subFrameRate, L"FPS вторичного потока")) return;
-            if (!ReadNumber(kSubBitrate, 64, 50000, updated.subBitrateKbps, L"Битрейт вторичного потока")) return;
-            if (!ReadNumber(kSubGop, 1, 600, updated.subGopSize, L"Интервал ключевых кадров вторичного потока")) return;
+            if (!ReadNumber(kSubFps, 1, updated.frameRate, updated.subFrameRate, UiText(L"FPS вторичного потока", L"Sub-stream FPS"))) return;
+            if (!ReadNumber(kSubBitrate, 64, 50000, updated.subBitrateKbps, UiText(L"Битрейт вторичного потока", L"Sub-stream bitrate"))) return;
+            if (!ReadNumber(kSubGop, 1, 600, updated.subGopSize, UiText(L"Интервал ключевых кадров вторичного потока", L"Sub-stream keyframe interval"))) return;
             updated.subRtspPath = GetText(kSubPath);
             if ((updated.subWidth & 1U) || (updated.subHeight & 1U) || !IsValidRtspPath(updated.subRtspPath) ||
                 updated.subRtspPath == updated.rtspPath)
             {
-                MessageBoxW(window_, L"Размеры вторичного потока должны быть чётными. Путь RTSP должен отличаться от основного "
-                            L"и задаваться без начального /, пробелов, \\, ? или #. Пример: Streaming/Channels/102.",
-                            L"Вторичный поток", MB_OK | MB_ICONWARNING);
+                MessageBoxW(window_, UiText(L"Размеры вторичного потока должны быть чётными. Путь RTSP должен отличаться от основного "
+                                                   L"и задаваться без начального /, пробелов, \\, ? или #. Пример: Streaming/Channels/102.",
+                                               L"Sub-stream dimensions must be even. Its RTSP path must differ from the main path "
+                                                   L"and contain no leading /, spaces, \\, ? or #. Example: Streaming/Channels/102."),
+                            UiText(L"Вторичный поток", L"Sub stream"), MB_OK | MB_ICONWARNING);
                 return;
             }
         }
@@ -1827,7 +1916,7 @@ private:
             if (subSize.width && subSize.height) { updated.subWidth = subSize.width; updated.subHeight = subSize.height; }
             NormalizeSubStreamSettings(updated);
         }
-        if (!ReadNumber(kMinimumFps, 1, 30, updated.minimumFrameRate, L"Минимальный FPS")) return;
+        if (!ReadNumber(kMinimumFps, 1, 30, updated.minimumFrameRate, UiText(L"Минимальный FPS", L"Minimum FPS"))) return;
         updated.minimumFrameRate = std::min(updated.minimumFrameRate, updated.frameRate);
         const LRESULT captureMode = SendDlgItemMessageW(window_, kCaptureMode, CB_GETCURSEL, 0, 0);
         updated.captureMode = captureMode >= 0 ? static_cast<uint32_t>(captureMode) : 0;
@@ -1836,28 +1925,31 @@ private:
             updated.monitorIndex = static_cast<uint32_t>(SendDlgItemMessageW(window_, kMonitorIndex, CB_GETITEMDATA, monitor, 0));
         if (updated.captureMode == 1)
         {
-            if (!ReadSignedNumber(kRegionX, -32768, 32768, updated.captureRegionX, L"Слева, пикс.")) return;
-            if (!ReadSignedNumber(kRegionY, -32768, 32768, updated.captureRegionY, L"Сверху, пикс.")) return;
-            if (!ReadNumber(kRegionWidth, 16, 16384, updated.captureRegionWidth, L"Ширина области")) return;
-            if (!ReadNumber(kRegionHeight, 16, 16384, updated.captureRegionHeight, L"Высота области")) return;
+            if (!ReadSignedNumber(kRegionX, -32768, 32768, updated.captureRegionX, UiText(L"Слева, пикс.", L"Left, px"))) return;
+            if (!ReadSignedNumber(kRegionY, -32768, 32768, updated.captureRegionY, UiText(L"Сверху, пикс.", L"Top, px"))) return;
+            if (!ReadNumber(kRegionWidth, 16, 16384, updated.captureRegionWidth, UiText(L"Ширина области", L"Area width"))) return;
+            if (!ReadNumber(kRegionHeight, 16, 16384, updated.captureRegionHeight, UiText(L"Высота области", L"Area height"))) return;
         }
         if (IsDlgButtonChecked(window_, kHighlightMouseClicks) == BST_CHECKED)
         {
-            if (!ReadNumber(kMouseClickSize, 32, 320, updated.mouseClickHighlightSize, L"Размер подсветки нажатия")) return;
-            if (!ReadNumber(kMouseClickDuration, 200, 3000, updated.mouseClickHighlightDurationMs, L"Время затухания нажатия")) return;
+            if (!ReadNumber(kMouseClickSize, 32, 320, updated.mouseClickHighlightSize, UiText(L"Размер подсветки нажатия", L"Click highlight size"))) return;
+            if (!ReadNumber(kMouseClickDuration, 200, 3000, updated.mouseClickHighlightDurationMs, UiText(L"Время затухания нажатия", L"Click fade duration"))) return;
         }
         if (updated.timestampMarginX + updated.timestampPaddingX * 2 >= updated.outputWidth ||
             updated.timestampMarginY + updated.timestampPaddingY * 2 >= updated.outputHeight)
         {
-            MessageBoxW(window_, L"Отступы текста слишком велики для выбранного разрешения.",
-                        L"Настройки Screen2NVR", MB_OK | MB_ICONWARNING);
+            MessageBoxW(window_, UiText(L"Отступы текста слишком велики для выбранного разрешения.",
+                                        L"The text margins are too large for the selected resolution."),
+                        UiText(L"Настройки Screen2NVR", L"Screen2NVR Settings"), MB_OK | MB_ICONWARNING);
             return;
         }
         if (updated.cameraName.empty() || !IsValidRtspPath(updated.rtspPath))
         {
-            MessageBoxW(window_, L"Укажите имя камеры и путь RTSP без начального /, пробелов, \\, ? или #. "
-                        L"Пример пути: Streaming/Channels/101.",
-                        L"Настройки Screen2NVR", MB_OK | MB_ICONWARNING);
+            MessageBoxW(window_, UiText(L"Укажите имя камеры и путь RTSP без начального /, пробелов, \\, ? или #. "
+                                               L"Пример пути: Streaming/Channels/101.",
+                                           L"Enter a camera name and an RTSP path without a leading /, spaces, \\, ? or #. "
+                                               L"Example: Streaming/Channels/101."),
+                        UiText(L"Настройки Screen2NVR", L"Screen2NVR Settings"), MB_OK | MB_ICONWARNING);
             return;
         }
         const LRESULT selectedPosition = SendDlgItemMessageW(window_, kTextPosition, CB_GETCURSEL, 0, 0);
@@ -1878,28 +1970,40 @@ private:
         if ((updated.captureMode == 2 && updated.captureWindowTitle.empty()) ||
             (updated.authenticationEnabled && (updated.userName.empty() || updated.password.empty())))
         {
-            MessageBoxW(window_, L"Для выбранного режима заполните заголовок окна и данные авторизации.",
-                        L"Настройки Screen2NVR", MB_OK | MB_ICONWARNING);
+            MessageBoxW(window_, UiText(L"Для выбранного режима заполните заголовок окна и данные авторизации.",
+                                        L"Enter the window title and authentication details required by the selected mode."),
+                        UiText(L"Настройки Screen2NVR", L"Screen2NVR Settings"), MB_OK | MB_ICONWARNING);
             return;
         }
         std::wstring error;
+        if (settings_.uiLanguage != updated.uiLanguage &&
+            (updated.standbyText == L"Экран временно недоступен" ||
+             updated.standbyText == L"Screen temporarily unavailable"))
+            updated.standbyText = updated.uiLanguage == 1
+                ? L"Screen temporarily unavailable" : L"Экран временно недоступен";
         if (!(status_.settingsSaver ? status_.settingsSaver(updated, error) : SaveAppSettings(updated, error)))
         {
             if (status_.logger) status_.logger("Settings save failed: " + WideToUtf8String(error));
-            MessageBoxW(window_, error.c_str(), L"Ошибка сохранения", MB_OK | MB_ICONERROR);
+            MessageBoxW(window_, error.c_str(), UiText(L"Ошибка сохранения", L"Save error"), MB_OK | MB_ICONERROR);
             return;
         }
+        const bool languageChanged = settings_.uiLanguage != updated.uiLanguage;
         settings_ = updated;
         draftSettings_ = updated;
+        SetUiLanguage(updated.uiLanguage);
         if (status_.configureLogging && !status_.configureLogging(updated.loggingEnabled, error))
-            MessageBoxW(window_, (L"Настройки сохранены, но запись журнала недоступна.\n\n" + error).c_str(),
-                        L"Журнал Screen2NVR", MB_OK | MB_ICONWARNING);
+            MessageBoxW(window_, (std::wstring(UiText(L"Настройки сохранены, но запись журнала недоступна.\n\n",
+                                                      L"Settings were saved, but file logging is unavailable.\n\n")) + error).c_str(),
+                        UiText(L"Журнал Screen2NVR", L"Screen2NVR log"), MB_OK | MB_ICONWARNING);
         const bool restartNeeded = SettingsRequireRestart(activeSettings_, updated);
         status_.QueueLiveSettings(updated);
         CopyLiveSettings(activeSettings_, updated);
         ShowWindow(window_, SW_HIDE);
-        if (restartNeeded && MessageBoxW(window_, L"Настройки сохранены. Для изменения источника, параметров видео, "
-                        L"камеры или сети требуется перезапуск. Перезапустить Screen2NVR сейчас?",
+        if (languageChanged) RebuildLocalizedControls();
+        if (restartNeeded && MessageBoxW(window_, UiText(L"Настройки сохранены. Для изменения источника, параметров видео, "
+                                                             L"камеры или сети требуется перезапуск. Перезапустить Screen2NVR сейчас?",
+                                                         L"Settings saved. Changes to the source, video parameters, camera or network "
+                                                             L"require a restart. Restart Screen2NVR now?"),
                         L"Screen2NVR", MB_YESNO | MB_ICONINFORMATION) == IDYES)
         {
             std::vector<wchar_t> executable(32768);
@@ -1908,7 +2012,8 @@ private:
             if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", executable.data(), parameters.c_str(),
                                                         nullptr, SW_SHOWNORMAL)) <= 32)
             {
-                MessageBoxW(window_, L"Не удалось запустить перезапуск. Настройки применятся при следующем запуске.",
+                MessageBoxW(window_, UiText(L"Не удалось запустить перезапуск. Настройки применятся при следующем запуске.",
+                                            L"Could not start the restart. The settings will apply on the next launch."),
                             L"Screen2NVR", MB_OK | MB_ICONWARNING);
                 return;
             }

@@ -138,6 +138,12 @@ int wmain()
         Require(SaveAppSettingsFile(first, path, error) && Value(path, L"Logging", L"Enabled") == L"0",
                 "Logging disabled value not persisted");
         std::cout << "PASS: logging default-off and enable/disable persistence\n";
+        auto english = first; english.uiLanguage = 1;
+        Require(SaveAppSettingsFile(english, path, error) && Value(path, L"General", L"Language") == L"1",
+                "English language was not persisted");
+        Require(SaveAppSettingsFile(first, path, error) && Value(path, L"General", L"Language") == L"0",
+                "Russian language was not persisted");
+        std::cout << "PASS: Russian/English language persistence\n";
         Require(Value(path, L"Camera", L"Manufacturer") == L"__missing__" && Value(path, L"Camera", L"Serial") == L"__missing__",
                 "Hardware identity must not be persisted as portable camera settings");
         Require(Value(path, L"Network", L"OnvifPort") == L"80" &&

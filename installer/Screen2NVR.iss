@@ -1,5 +1,5 @@
 #define MyAppName "Screen2NVR"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Screen2NVR"
 #define MyAppExeName "Screen2NVR.exe"
 
@@ -26,13 +26,33 @@ AppMutex=Local\Screen2NVR.ScreenCapture
 UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupLogging=yes
 SetupIconFile=..\assets\Screen2NVR.ico
+ShowLanguageDialog=yes
 
 [Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
+[CustomMessages]
+english.AutoStart=Start Screen2NVR when I sign in to Windows
+russian.AutoStart=Запускать Screen2NVR при входе в Windows
+english.AutoStartGroup=Startup:
+russian.AutoStartGroup=Автозагрузка:
+english.DesktopIcon=Create a desktop shortcut
+russian.DesktopIcon=Создать ярлык на рабочем столе
+english.ShortcutsGroup=Shortcuts:
+russian.ShortcutsGroup=Ярлыки:
+english.UninstallApp=Uninstall Screen2NVR
+russian.UninstallApp=Удалить Screen2NVR
+english.LaunchApp=Launch Screen2NVR
+russian.LaunchApp=Запустить Screen2NVR
+english.MissingMediaFoundation=Microsoft Media Foundation is not available in this edition of Windows.%n%nIf you use Windows 10 N or Windows 11 N, install the official Media Feature Pack from Settings > Apps > Optional features, restart the computer, and run the Screen2NVR installer again.
+russian.MissingMediaFoundation=В этой редакции Windows отсутствует компонент Microsoft Media Foundation.%n%nЕсли используется Windows 10 N или Windows 11 N, установите официальный компонент «Media Feature Pack» через «Параметры» > «Приложения» > «Дополнительные компоненты», перезагрузите компьютер и повторите установку Screen2NVR.
+english.MissingD3DCompiler=The standard Direct3D component D3DCompiler_47.dll is missing from Windows.%n%nInstall all Windows updates and run the Screen2NVR installer again.
+russian.MissingD3DCompiler=В Windows отсутствует штатный компонент Direct3D D3DCompiler_47.dll.%n%nУстановите все обновления Windows и повторите установку Screen2NVR.
+
 [Tasks]
-Name: "autostart"; Description: "Запускать Screen2NVR при входе в Windows"; GroupDescription: "Автозагрузка:"; Flags: checkedonce
-Name: "desktopicon"; Description: "Создать ярлык на рабочем столе"; GroupDescription: "Ярлыки:"; Flags: unchecked
+Name: "autostart"; Description: "{cm:AutoStart}"; GroupDescription: "{cm:AutoStartGroup}"; Flags: checkedonce
+Name: "desktopicon"; Description: "{cm:DesktopIcon}"; GroupDescription: "{cm:ShortcutsGroup}"; Flags: unchecked
 
 [Files]
 Source: "..\x64\Release\Screen2NVR.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -43,7 +63,7 @@ Name: "{commonappdata}\Screen2NVR\logs"; Permissions: users-modify
 
 [Icons]
 Name: "{group}\Screen2NVR"; Filename: "{app}\{#MyAppExeName}"
-Name: "{group}\Удалить Screen2NVR"; Filename: "{uninstallexe}"
+Name: "{group}\{cm:UninstallApp}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\Screen2NVR"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
@@ -51,7 +71,8 @@ Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Screen2NVR"" dir=in action=allow program=""{app}\{#MyAppExeName}"" enable=yes profile=any"; Flags: runhidden waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--set-autostart=1"; Flags: runhidden waituntilterminated runasoriginaluser; Check: ShouldEnableAutoStart
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--set-autostart=0"; Flags: runhidden waituntilterminated runasoriginaluser; Check: ShouldDisableAutoStart
-Filename: "{app}\{#MyAppExeName}"; Description: "Запустить Screen2NVR"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--set-language={code:AppLanguage}"; Flags: runhidden waituntilterminated runasoriginaluser
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchApp}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM {#MyAppExeName}"; Flags: runhidden waituntilterminated; RunOnceId: "StopScreen2NVR"
@@ -66,21 +87,13 @@ begin
 
   if not FileExists(ExpandConstant('{sys}\mfplat.dll')) then
   begin
-    MsgBox(
-      'В этой редакции Windows отсутствует компонент Microsoft Media Foundation.' + #13#10 + #13#10 +
-      'Если используется Windows 10 N или Windows 11 N, установите официальный компонент ' +
-      '«Media Feature Pack» через «Параметры» → «Приложения» → «Дополнительные компоненты», ' +
-      'перезагрузите компьютер и повторите установку Screen2NVR.',
-      mbCriticalError, MB_OK);
+    MsgBox(ExpandConstant('{cm:MissingMediaFoundation}'), mbCriticalError, MB_OK);
     Exit;
   end;
 
   if not FileExists(ExpandConstant('{sys}\D3DCompiler_47.dll')) then
   begin
-    MsgBox(
-      'В Windows отсутствует штатный компонент Direct3D D3DCompiler_47.dll.' + #13#10 + #13#10 +
-      'Установите все обновления Windows и повторите установку Screen2NVR.',
-      mbCriticalError, MB_OK);
+    MsgBox(ExpandConstant('{cm:MissingD3DCompiler}'), mbCriticalError, MB_OK);
     Exit;
   end;
 
@@ -90,6 +103,12 @@ end;
 function InstallerParameter(const Name: String): String;
 begin
   Result := ExpandConstant('{param:' + Name + '|}');
+end;
+
+function AppLanguage(Param: String): String;
+begin
+  if ActiveLanguage = 'russian' then Result := 'ru'
+  else Result := 'en';
 end;
 
 function ShouldEnableAutoStart(): Boolean;

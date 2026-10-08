@@ -30,6 +30,7 @@ std::vector<VideoResolution> BuildStreamResolutions(VideoResolution source, bool
 
 struct AppSettings
 {
+    uint32_t uiLanguage = 0;
     std::wstring cameraName = L"PC Screen Camera";
     uint16_t onvifPort = kDefaultOnvifPort;
     uint16_t rtspPort = 554;

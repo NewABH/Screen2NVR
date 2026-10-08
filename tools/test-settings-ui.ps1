@@ -226,7 +226,7 @@ try {
     Command 1001
     Assert (([SettingsUiTest]::Text((Control 2008))) -eq $initialMainResolution) 'Cancel restores original resolution without silently migrating existing settings'
     [SettingsUiTest]::Tab($script:window, 2)
-    foreach ($removed in @(2013,2023,2025,2026,2095)) {
+    foreach ($removed in @(2023,2025,2026,2095)) {
         Assert ((Control $removed) -eq [IntPtr]::Zero) "Obsolete overlay control $removed removed"
     }
     Assert (([SettingsUiTest]::Text((Control 2017))) -eq ([string][char]0x428 + [char]0x440 + [char]0x438 + [char]0x444 + [char]0x442)) 'Font button has its short caption'
@@ -322,6 +322,38 @@ try {
             Assert ((Send (Control 2096) 0xF0) -eq $enabled) "Logging=$enabled survives reopening"
         }
         Screenshot 'status-logging.png'
+        $russianStandbyText = [SettingsUiTest]::Text((Control 2061))
+        foreach ($language in @(1,0,1,0)) {
+            [SettingsUiTest]::Tab($script:window, 0)
+            SelectCombo 2013 $language
+            Command 2015
+            Assert (!$app.HasExited -and ![SettingsUiTest]::IsWindowVisible($script:window)) "Language=$language applies without restart"
+            Command 1001
+            Assert ((Send (Control 2013) 0x147) -eq $language) "Language=$language survives reopening"
+            if ($language -eq 1) {
+                Assert (([SettingsUiTest]::Text($script:window)) -eq 'Screen2NVR Settings' -and ([SettingsUiTest]::Text((Control 2015))) -eq 'Save') 'Window and button captions translated to English'
+                Assert ((ComboItems 2050)[0] -eq 'Entire monitor') 'Dynamic dropdowns translated to English'
+                Assert (([SettingsUiTest]::Text((Control 2061))) -eq 'Screen temporarily unavailable') 'Built-in standby message translated to English'
+                [SettingsUiTest]::Tab($script:window, 4)
+                Start-Sleep -Milliseconds 600
+                Assert (([SettingsUiTest]::Text((Control 2090))) -like 'Status:*') 'Runtime status translated to English'
+                Screenshot 'settings-english.png'
+            }
+            else {
+                Assert (([SettingsUiTest]::Text($script:window)) -ne 'Screen2NVR Settings' -and ([SettingsUiTest]::Text((Control 2015))) -ne 'Save') 'Russian captions restored'
+                Assert (([SettingsUiTest]::Text((Control 2061))) -eq $russianStandbyText) 'Built-in standby message restored to Russian'
+                Screenshot 'settings-russian.png'
+            }
+        }
+        [SettingsUiTest]::Tab($script:window, 0)
+        [SettingsUiTest]::SetWindowText((Control 2061), 'Custom standby text')
+        SelectCombo 2013 1
+        Command 2015
+        Command 1001
+        Assert (([SettingsUiTest]::Text((Control 2061))) -eq 'Custom standby text') 'Language selection preserves user-authored standby text'
+        SelectCombo 2013 0
+        Command 2015
+        Command 1001
         [SettingsUiTest]::Tab($script:window, 0)
         SourceMode 1
         foreach ($field in @(@(2052,'0'), @(2053,'0'), @(2054,'1000'), @(2055,'800'))) {

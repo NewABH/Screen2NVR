@@ -81,6 +81,24 @@ Digest negotiation and URI compatibility in unrelated UI/identity changes.
 Connection-stage diagnostics are bounded and must never contain Authorization, passwords,
 Digest responses, nonces, or raw credential-bearing URLs.
 
+Release 1.1.0 introduces Russian/English UI via Localization.h and [General] Language
+(0=Russian, 1=English). Default follows Windows UI language. The installer offers both
+languages and applies its selection using --set-language=ru/en. Switching UI language is
+live, not a reason to restart capture. Preserve camera names, templates and user-authored
+standby text; translate only the known built-in standby text. Rebuild localized controls
+without losing the selected tab or saved/draft state. Keep documentation in both languages.
+
+The user reports iVMS-4200 3.6.0.6 gray live/remote archives, while 3.13.0.5 and exported
+recordings work. Published Hikvision notes document player/playctrl.dll updates but do not
+identify the exact trigger. Do not claim field compatibility with old iVMS until checked.
+The RTSP publisher previously sent SPS,PPS,AUD,SPS,PPS,IDR. H.264 requires an existing AUD
+to be first. OrderAccessUnit now emits AUD first and supplies cached SPS/PPS only when
+missing in an IDR; preserve original distinct parameter sets and coded picture bytes.
+Keep last-packet markers, sample-derived 90 kHz timestamps and Digest behavior unchanged.
+Do not add another allocation to every predicted picture just for ordering. Regression
+tests are tools/build-rtsp-tests.cmd, dual-stream RTP timing/order checks, and independent
+Windows H.264 decoding in EncoderTests --decode [--software]. See COMPATIBILITY.md.
+
 ---
 
 ## 1. Primary goal

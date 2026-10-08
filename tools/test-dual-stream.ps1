@@ -8,12 +8,16 @@ function Assert([bool]$condition, [string]$message) {
 Add-Type @'
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Net.Sockets;
 using System.Threading.Tasks;
 public class RtpStats {
     public long Ssrc=-1, First=-1, Last=-1;
     public int Frames=0, Packets=0;
+    public int IdrFrames=0, PredictedFrames=0;
+    public double WallSeconds=0;
+    public string FirstIdrNalOrder="";
     public bool Idr=false;
 }
 public class RtpReader {
@@ -26,36 +30,71 @@ public class RtpReader {
     public static Task<RtpStats> Receive(TcpClient client,int frames) {
         return Task.Run(()=> {
             var result=new RtpStats(); int previous=-1; var stream=client.GetStream();
+            var clock=Stopwatch.StartNew(); double firstWall=-1; bool idrFrame=false, predictedFrame=false;
+            var nalOrder=new List<int>(); long frameTimestamp=-1;
             while(result.Frames<frames) {
                 var h=Read(stream,4); if(h[0]!=36 || h[1]!=0) throw new Exception("Bad interleaved channel");
                 var p=Read(stream,(h[2]<<8)|h[3]); if(p.Length<14 || (p[0]>>6)!=2) throw new Exception("Bad RTP");
                 int seq=(p[2]<<8)|p[3]; if(previous>=0 && seq!=((previous+1)&65535)) throw new Exception("RTP sequence gap/mixed streams"); previous=seq;
                 long ssrc=U32(p,8); if(result.Ssrc>=0 && ssrc!=result.Ssrc) throw new Exception("SSRC changed"); result.Ssrc=ssrc;
                 result.Packets++; int type=p[12]&31;
-                if(type==5 || (type==28 && (p[13]&31)==5)) result.Idr=true;
-                if((p[1]&128)!=0) { long t=U32(p,4); if(t<=result.Last) throw new Exception("RTP timestamp order"); if(result.First<0) result.First=t; result.Last=t; result.Frames++; }
+                long packetTimestamp=U32(p,4);
+                if(frameTimestamp>=0 && packetTimestamp!=frameTimestamp) throw new Exception("Timestamp changes inside an access unit");
+                frameTimestamp=packetTimestamp;
+                int nalType=type==28 ? p[13]&31 : type;
+                if(type!=28 || (p[13]&128)!=0) nalOrder.Add(nalType);
+                if(nalType==5) { result.Idr=true; idrFrame=true; }
+                if(nalType==1) predictedFrame=true;
+                if((p[1]&128)!=0) {
+                    long t=U32(p,4); if(t<=result.Last) throw new Exception("RTP timestamp order");
+                    if(result.First<0) { result.First=t; firstWall=clock.Elapsed.TotalSeconds; }
+                    result.Last=t; result.Frames++;
+                    if(idrFrame) {
+                        int aud=nalOrder.IndexOf(9);
+                        if(aud>0) throw new Exception("AUD is not the first NAL in the access unit");
+                        int sps=nalOrder.IndexOf(7), pps=nalOrder.IndexOf(8), idr=nalOrder.IndexOf(5);
+                        if(sps<0 || pps<=sps || idr<=pps) throw new Exception("IDR parameter sets missing/out of order");
+                        if(nalOrder.FindAll(n=>n==7).Count!=1 || nalOrder.FindAll(n=>n==8).Count!=1) throw new Exception("Duplicated IDR SPS/PPS");
+                        result.IdrFrames++; if(result.FirstIdrNalOrder.Length==0) result.FirstIdrNalOrder=String.Join(",",nalOrder);
+                    }
+                    else if(predictedFrame) result.PredictedFrames++;
+                    nalOrder.Clear(); frameTimestamp=-1;
+                    idrFrame=false; predictedFrame=false;
+                    result.WallSeconds=clock.Elapsed.TotalSeconds-firstWall;
+                }
             }
             return result;
         });
     }
 }
 public class BaselineSps {
+    public int Width, Height, Profile, Level;
+    public double VuiFps;
+    public bool FixedFrameRate;
     byte[] data; int bit;
     uint Bits(int n) { uint v=0; for(int i=0;i<n;i++) { if(bit>=data.Length*8) throw new Exception("Short SPS"); v=(v<<1)|(uint)((data[bit/8]>>(7-bit%8))&1); bit++; } return v; }
     uint Ue() { int zeros=0; while(Bits(1)==0) { if(++zeros>30) throw new Exception("Invalid SPS"); } return ((1u<<zeros)-1)+Bits(zeros); }
     int Se() { uint n=Ue(); return (n%2==0) ? -(int)(n/2) : (int)((n+1)/2); }
-    public static int[] Size(byte[] nal) {
+    public static BaselineSps Parse(byte[] nal) {
         var bytes=new List<byte>(); int zeros=0;
         for(int i=1;i<nal.Length;i++) { if(zeros==2 && nal[i]==3) { zeros=0; continue; } bytes.Add(nal[i]); zeros=nal[i]==0 ? zeros+1 : 0; }
         var r=new BaselineSps {data=bytes.ToArray()};
-        uint profile=r.Bits(8); r.Bits(8); r.Bits(8); r.Ue();
+        uint profile=r.Bits(8); r.Profile=(int)profile; r.Bits(8); r.Level=(int)r.Bits(8); r.Ue();
         if(profile!=66 && profile!=77) throw new Exception("Expected Baseline/Main H264");
         r.Ue(); uint poc=r.Ue();
         if(poc==0) r.Ue(); else if(poc==1) { r.Bits(1); r.Se(); r.Se(); uint n=r.Ue(); for(uint i=0;i<n;i++) r.Se(); }
         r.Ue(); r.Bits(1); int w=(int)(r.Ue()+1)*16; int h=(int)(r.Ue()+1)*16;
         int frame=(int)r.Bits(1); if(frame==0) r.Bits(1); h*=2-frame; r.Bits(1);
         if(r.Bits(1)!=0) { int left=(int)r.Ue(), right=(int)r.Ue(), top=(int)r.Ue(), bottom=(int)r.Ue(); w-=2*(left+right); h-=2*(2-frame)*(top+bottom); }
-        return new int[]{w,h};
+        r.Width=w; r.Height=h;
+        if(r.Bits(1)!=0) { // vui_parameters_present_flag
+            if(r.Bits(1)!=0 && r.Bits(8)==255) { r.Bits(16); r.Bits(16); }
+            if(r.Bits(1)!=0) r.Bits(1);
+            if(r.Bits(1)!=0) { r.Bits(3); r.Bits(1); if(r.Bits(1)!=0) { r.Bits(8); r.Bits(8); r.Bits(8); } }
+            if(r.Bits(1)!=0) { r.Ue(); r.Ue(); }
+            if(r.Bits(1)!=0) { uint units=r.Bits(32), scale=r.Bits(32); r.FixedFrameRate=r.Bits(1)!=0; if(units!=0) r.VuiFps=scale/(2.0*units); }
+        }
+        return r;
     }
 }
 '@
@@ -208,8 +247,9 @@ function OpenStream([string]$uri,[int]$width,[int]$height) {
         }
         Assert ($response.Header -match '^RTSP/1.0 200') "DESCRIBE $uri"
         if ($response.Body -notmatch 'sprop-parameter-sets=([^,\r\n]+),([^\r\n]+)') { throw 'Missing SPS/PPS' }
-        $sps=$Matches[1]; $size=[BaselineSps]::Size([Convert]::FromBase64String($sps))
-        Assert ($size[0] -eq $width -and $size[1] -eq $height) "Real encoder SPS is ${width}x${height}"
+        $sps=$Matches[1]; $info=[BaselineSps]::Parse([Convert]::FromBase64String($sps))
+        Assert ($info.Width -eq $width -and $info.Height -eq $height) "Real encoder SPS is ${width}x${height}"
+        Write-Host "H.264: profile=$($info.Profile), level=$($info.Level), VUI FPS=$($info.VuiFps), fixed-rate=$($info.FixedFrameRate)"
         $response=Rtsp $client 'SETUP' "$uri/trackID=0" 2 "Transport: RTP/AVP/TCP;unicast;interleaved=0-1`r`n"
         Assert ($response.Header -match '^RTSP/1.0 200') "SETUP $uri"
         if ($response.Header -notmatch 'Session: ([^;\r\n]+)') { throw 'No session' }; $session=$Matches[1]
@@ -267,7 +307,7 @@ try {
         $osd=Onvif 'GetOSDs'
         Assert ((Node $osd 'FontSize').InnerText -eq '21' -and (Node $osd 'FontColor').Transparent -eq '0') 'ONVIF OSD reflects live font/template changes without restarting'
     }
-    foreach ($field in @('Ssrc','First','Last','Frames','Packets','Idr')) {
+    foreach ($field in @('Ssrc','First','Last','Frames','Packets','Idr','IdrFrames','PredictedFrames','WallSeconds','FirstIdrNalOrder')) {
         $main[$field]=$mainStats.$field; $sub[$field]=$subStats.$field
     }
     Assert ($main.Ssrc -ne $sub.Ssrc -and $main.Sps -ne $sub.Sps) 'Independent SSRC and SPS/PPS; RTP is not mixed'
@@ -276,6 +316,11 @@ try {
     foreach ($pair in @(@($main,12),@($sub,8))) {
         $state=$pair[0]; $fps=($state.Frames-1)*90000.0/($state.Last-$state.First)
         Assert ([Math]::Abs($fps-$pair[1]) -lt 0.25) "Independent RTP frame rate: $([Math]::Round($fps,2)) fps"
+        Assert ($state.IdrFrames -gt 0 -and $state.PredictedFrames -gt 0) 'Stream contains both keyframes and predicted frames'
+        $rtpSeconds=($state.Last-$state.First)/90000.0
+        Assert ([Math]::Abs($rtpSeconds-$state.WallSeconds) -lt 1.5) 'RTP duration matches elapsed receiving time (no accelerated timestamps)'
+        Write-Host "Frames: IDR=$($state.IdrFrames), predicted=$($state.PredictedFrames); RTP seconds=$([Math]::Round($rtpSeconds,2)), wall seconds=$([Math]::Round($state.WallSeconds,2))"
+        Write-Host "First keyframe NAL order: $($state.FirstIdrNalOrder) (9=AUD, 7=SPS, 8=PPS, 6=SEI, 5=IDR)"
         Assert ($state.Packets -gt 64) 'Consecutive RTP packets and complete access units received'
     }
     $main.Client.Dispose(); $main=$null

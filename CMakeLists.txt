@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(Screen2NVR LANGUAGES CXX RC)
+project(Screen2NVR VERSION 1.1.0 LANGUAGES CXX RC)
 
 add_executable(Screen2NVR ScreenCapture.cpp RtspServer.cpp Screen2ONVIF.cpp Settings.cpp Security.cpp TrayApp.cpp Screen2NVR.rc)
 target_compile_features(Screen2NVR PRIVATE cxx_std_17)

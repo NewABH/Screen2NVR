@@ -194,13 +194,14 @@ int wmain(int argc, wchar_t* argv[])
         saved.privacyMasks = L"20,30,100,80"; saved.showCursor = false;
         saved.autoStart = !active.autoStart; saved.adaptiveFrameRate = false;
         saved.loggingEnabled = true;
+        saved.uiLanguage = 1;
         Require(!SettingsRequireRestart(active, saved), "Live settings incorrectly require restart");
         TrayRuntimeStatus mailbox;
         uint64_t revision = 0;
         mailbox.QueueLiveSettings(saved);
         Require(mailbox.ConsumeLiveSettings(active, revision) && active.overlayTemplate == L"{camera}" &&
                 active.timestampFontName == L"Arial" && active.timestampFontSize == 24 &&
-                active.privacyMasks == saved.privacyMasks && !active.showCursor && !active.adaptiveFrameRate && active.loggingEnabled,
+                active.privacyMasks == saved.privacyMasks && !active.showCursor && !active.adaptiveFrameRate && active.loggingEnabled && active.uiLanguage == 1,
                 "Saved live settings were not applied");
         Require(!mailbox.ConsumeLiveSettings(active, revision), "Same revision was applied more than once");
         saved.loggingEnabled = false;

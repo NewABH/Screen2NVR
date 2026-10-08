@@ -1,95 +1,104 @@
 # Screen2NVR
 
-Screen2NVR превращает рабочий стол Windows 10/11 в сетевую H.264-камеру, которую можно
-подключить к видеорегистратору Hikvision по ONVIF или RTSP.
+[Русский](README.ru.md) · [Releases](https://github.com/NewABH/Screen2NVR/releases)
 
-Приложение состоит из одного нативного `Screen2NVR.exe`. Внешние FFmpeg, MediaMTX,
-.NET Runtime и отдельные фоновые службы не требуются.
+Screen2NVR turns a Windows 10/11 desktop into a network H.264 camera for ONVIF or
+RTSP recorders, including Hikvision NVRs.
 
-> **Проект разработан искусственным интеллектом OpenAI Codex по требованиям пользователя.**
-> Архитектурные решения, функциональные требования и результаты работы проверялись пользователем,
-> в том числе с реальным видеорегистратором Hikvision и на разных компьютерах.
+All capture, encoding, RTSP, ONVIF, discovery and tray controls run in one native
+`Screen2NVR.exe`. No FFmpeg, MediaMTX, .NET runtime or separate service is required.
 
-## Возможности
+This project was developed by the OpenAI Codex AI assistant from the user's
+requirements. The user made product and architectural decisions and tested the
+application on actual computers and a Hikvision recorder. See
+[AI_DEVELOPMENT.md](AI_DEVELOPMENT.md).
 
-- захват монитора, прямоугольной области, выбранного или активного окна через DXGI;
-- GPU-масштабирование и обработка через D3D11;
-- аппаратное H.264-кодирование Media Foundation с программным резервом;
-- основной и дополнительный RTSP-потоки;
-- встроенные RTSP, ONVIF и WS-Discovery серверы;
-- совместимая с Hikvision RTSP Digest-аутентификация;
-- наложение даты, времени и имени камеры, скрывающие маски и подсветка нажатий мыши;
-- значок в области уведомлений, графические настройки, автозапуск и контроль зависания потока;
-- необязательный журнал с ограничением размера.
+## Features
 
-Стандартные адреса:
+- DXGI capture of a monitor, rectangular area, named window or active window.
+- D3D11 scaling, rotation and HDR processing.
+- Media Foundation hardware H.264 encoding with an explicitly permitted software fallback.
+- Main and optional secondary RTSP streams with independent resolution, FPS, bitrate and GOP.
+- Embedded RTSP/RTP, ONVIF and WS-Discovery servers.
+- Hikvision-compatible RTSP Digest authentication and an IP allowlist.
+- Text overlays, privacy masks and soft highlights for individual mouse clicks.
+- Tray controls, Russian/English settings, optional sign-in startup and a stream watchdog.
+- Optional bounded file logging, disabled by default.
+
+Default endpoints:
 
 ```text
 ONVIF:         http://<IP>:80/onvif/device_service
-Основной RTSP: rtsp://<IP>:554/Streaming/Channels/101
-Вторичный:     rtsp://<IP>:554/Streaming/Channels/102
+Main RTSP:     rtsp://<IP>:554/Streaming/Channels/101
+Secondary:     rtsp://<IP>:554/Streaming/Channels/102
 ```
 
-## Установка
+Existing custom ports and paths are preserved when upgrading.
 
-Скачайте `Screen2NVR-Setup-x64.exe` со страницы Releases и запустите от имени администратора.
-Установщик разместит приложение в `Program Files`, добавит правило брандмауэра и предложит
-включить автозагрузку.
+## Install and use
 
-Настройки и журналы хранятся в `%ProgramData%\Screen2NVR` и не входят в репозиторий.
+Download `Screen2NVR-Setup-x64.exe` from
+[Releases](https://github.com/NewABH/Screen2NVR/releases). Select English or Russian
+at the start of installation. Setup installs into `Program Files`, adds an
+inbound firewall rule and offers automatic startup when the current user signs in.
 
-Подробная инструкция по установке, настройке Hikvision, диагностике и тестам находится в
-[DEPLOYMENT.md](DEPLOYMENT.md).
+Right-click the tray icon to open **Settings**, or double-click it. The **Device**
+tab also lets you change the interface language; this does not interrupt the stream.
+Language selection does not translate your camera name or custom overlay text.
 
-## Сборка
+Settings and optional logs are stored in `%ProgramData%\Screen2NVR`.
+For configuration, NVR setup, compatibility limits and troubleshooting, read
+[the English guide](DEPLOYMENT.en.md) or [the Russian guide](DEPLOYMENT.md).
+Changes in each release are documented in [CHANGELOG.md](CHANGELOG.md).
 
-Требуются Windows 10/11 x64, Visual Studio 2022 Build Tools с компонентом Desktop development
-with C++ и Windows SDK.
+## Build
+
+Use Windows 10/11 x64, Visual Studio 2022 Build Tools with **Desktop development
+with C++**, and the Windows SDK.
 
 ```bat
 build-release.cmd
 ```
 
-Результат: `x64\Release\Screen2NVR.exe`.
-
-Для создания установщика дополнительно требуется Inno Setup 6:
+Output: `x64\Release\Screen2NVR.exe`. To build the installer, also install
+Inno Setup 6, then run:
 
 ```bat
 build-installer.cmd
 ```
 
-## Проверки
+CMake is an alternative: `cmake -S . -B build -A x64`, then
+`cmake --build build --config Release`.
+
+## Tests
 
 ```bat
 tools\build-settings-tests.cmd
+tools\build-rtsp-tests.cmd
 tools\build-encoder-tests.cmd
 tools\build-logging-tests.cmd
 ```
 
-Сетевые и GPU-проверки описаны в [DEPLOYMENT.md](DEPLOYMENT.md#проверки-для-разработчика).
+The [English deployment guide](DEPLOYMENT.en.md#developer-checks) lists UI,
+decoder, network and dual-stream checks.
 
-## Совместимость
+## Compatibility and security
 
-Основная целевая конфигурация — компьютеры со встроенной графикой Intel UHD. Реализация не
-использует NVIDIA-специфические API и также работает с совместимыми NVIDIA/AMD адаптерами.
-Конкретную модель и прошивку регистратора рекомендуется проверять отдельно.
+Intel integrated graphics is a primary target. No NVIDIA-specific API is used.
+A working D3D11/WDDM graphics driver and an interactive desktop session are required.
+Windows N editions need the official Windows Media Feature Pack. A separate
+Visual C++ Redistributable is not needed: the Release build uses the static runtime.
 
-## Безопасность
+Test the specific GPU driver, NVR firmware and viewing client before deployment.
+The 1.1.0 release fixes a malformed H.264 access-unit order; compatibility with
+iVMS-4200 3.6.0.6 through the affected NVR still needs an on-device check.
 
-Программа передаёт изображение пользовательского рабочего стола по сети. Перед эксплуатацией
-в недоверенной сети включите имя пользователя и пароль и ограничьте разрешённые IP-адреса.
-Не публикуйте `%ProgramData%\Screen2NVR\config.ini`: он может содержать пароль камеры.
+The stream exposes your desktop. Use authentication and an IP allowlist on a
+trusted LAN; RTSP and HTTP traffic are not encrypted. Do not publish
+`%ProgramData%\Screen2NVR\config.ini`: it may contain the camera password.
 
-## Сторонние материалы
+## Attribution and license
 
-Значок приложения основан на Google Material Symbols. Подробности приведены в
+The icon is based on Google Material Symbols; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-## Происхождение проекта
-
-Исходный код, интерфейс, тесты, сценарии сборки и документация Screen2NVR созданы и доработаны
-ИИ-ассистентом OpenAI Codex по последовательным требованиям пользователя. Пользователь определял
-назначение программы, принимал архитектурные решения и проводил практические проверки результата.
-Англоязычное уведомление: [AI_DEVELOPMENT.md](AI_DEVELOPMENT.md).
-
-Лицензия исходного кода проекта будет указана отдельно владельцем репозитория.
+The repository owner has not yet specified a source-code license.

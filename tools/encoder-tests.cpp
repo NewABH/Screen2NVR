@@ -217,6 +217,156 @@ void Tests()
     Require(H264EncoderTestAccess::Output(encoder) == MF_E_TRANSFORM_NEED_MORE_INPUT, "Synchronous drain ends");
     std::cout << "PASS: synchronous NEED_MORE_INPUT\n";
 }
+
+// Independent Windows decoder verifies real encoded pictures, not merely RTP/NAL headers.
+// Only synthetic GPU pixels are used; no desktop recording or deployed settings are touched.
+class DecoderCheck
+{
+public:
+    DecoderCheck()
+    {
+        MFT_REGISTER_TYPE_INFO inputInfo{ MFMediaType_Video, MFVideoFormat_H264 };
+        IMFActivate** activations = nullptr; UINT32 count = 0;
+        CheckHr(MFTEnumEx(MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+                         &inputInfo, nullptr, &activations, &count), "Find Windows H.264 decoder");
+        HRESULT activation = count ? activations[0]->ActivateObject(IID_PPV_ARGS(&decoder_)) : E_NOINTERFACE;
+        for (UINT32 i = 0; i < count; ++i) activations[i]->Release();
+        CoTaskMemFree(activations);
+        CheckHr(activation, "Create Windows H.264 decoder");
+        ComPtr<IMFMediaType> input;
+        CheckHr(MFCreateMediaType(&input), "Create decoder input type");
+        input->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        input->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+        MFSetAttributeSize(input.Get(), MF_MT_FRAME_SIZE, 1920, 1080);
+        MFSetAttributeRatio(input.Get(), MF_MT_FRAME_RATE, 12, 1);
+        CheckHr(decoder_->SetInputType(0, input.Get(), 0), "Set decoder H.264 input");
+        SelectOutput();
+        decoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+        decoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+    }
+
+    static void Encoded(void* context, const uint8_t* bytes, size_t size,
+                        LONGLONG time, bool header)
+    {
+        auto& self = *static_cast<DecoderCheck*>(context);
+        if (header) { self.header_.assign(bytes, bytes + size); return; }
+        ++self.encodedFrames;
+        std::vector<uint8_t> accessUnit = self.header_;
+        self.header_.clear();
+        accessUnit.insert(accessUnit.end(), bytes, bytes + size);
+        ComPtr<IMFMediaBuffer> buffer;
+        CheckHr(MFCreateMemoryBuffer(static_cast<DWORD>(accessUnit.size()), &buffer), "Create decoder input buffer");
+        BYTE* data = nullptr;
+        CheckHr(buffer->Lock(&data, nullptr, nullptr), "Lock decoder input");
+        memcpy(data, accessUnit.data(), accessUnit.size());
+        buffer->Unlock(); buffer->SetCurrentLength(static_cast<DWORD>(accessUnit.size()));
+        ComPtr<IMFSample> sample;
+        MFCreateSample(&sample); sample->AddBuffer(buffer.Get());
+        sample->SetSampleTime(time); sample->SetSampleDuration(10'000'000 / 12);
+        CheckHr(self.decoder_->ProcessInput(0, sample.Get(), 0), "Decode actual encoder output");
+        self.Drain();
+    }
+
+    void Finish()
+    {
+        CheckHr(decoder_->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0), "Drain H.264 decoder");
+        Drain();
+        Require(encodedFrames == 48 && decodedFrames == encodedFrames, "Real decoder lost encoded pictures");
+        Require(changedFrames > 24 && nonGrayFrames == decodedFrames, "Decoded pictures are gray or frozen");
+        std::cout << "PASS: independently decoded " << decodedFrames << " synthetic H.264 pictures; "
+                  << changedFrames << " changing pictures, no gray/frozen frames\n";
+    }
+    unsigned encodedFrames = 0, decodedFrames = 0, nonGrayFrames = 0, changedFrames = 0;
+private:
+    void SelectOutput()
+    {
+        for (DWORD index = 0; ; ++index)
+        {
+            ComPtr<IMFMediaType> type;
+            CheckHr(decoder_->GetOutputAvailableType(0, index, &type), "Enumerate decoder output");
+            GUID subtype{}; type->GetGUID(MF_MT_SUBTYPE, &subtype);
+            if (subtype != MFVideoFormat_NV12) continue;
+            CheckHr(decoder_->SetOutputType(0, type.Get(), 0), "Set decoder NV12 output");
+            return;
+        }
+    }
+    void Drain()
+    {
+        for (;;)
+        {
+            MFT_OUTPUT_STREAM_INFO info{};
+            CheckHr(decoder_->GetOutputStreamInfo(0, &info), "Read decoder buffer size");
+            ComPtr<IMFSample> sample;
+            if (!(info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES))
+            {
+                ComPtr<IMFMediaBuffer> buffer;
+                CheckHr(MFCreateAlignedMemoryBuffer(std::max<DWORD>(info.cbSize, 1920 * 1088 * 3 / 2),
+                            info.cbAlignment ? info.cbAlignment - 1 : 0, &buffer), "Allocate decoder output");
+                MFCreateSample(&sample); sample->AddBuffer(buffer.Get());
+            }
+            MFT_OUTPUT_DATA_BUFFER output{ 0, sample.Get(), 0, nullptr };
+            DWORD flags = 0;
+            const HRESULT hr = decoder_->ProcessOutput(0, 1, &output, &flags);
+            ComPtr<IMFCollection> events; events.Attach(output.pEvents);
+            ComPtr<IMFSample> owned;
+            if (output.pSample != sample.Get()) owned.Attach(output.pSample);
+            if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) return;
+            if (hr == MF_E_TRANSFORM_STREAM_CHANGE) { SelectOutput(); continue; }
+            CheckHr(hr, "Read decoded H.264 picture");
+            Require(output.pSample != nullptr, "Decoder returned no picture");
+            ComPtr<IMFMediaBuffer> buffer;
+            CheckHr(output.pSample->ConvertToContiguousBuffer(&buffer), "Read decoded NV12 pixels");
+            BYTE* pixels = nullptr; DWORD length = 0;
+            CheckHr(buffer->Lock(&pixels, nullptr, &length), "Lock decoded picture");
+            unsigned low = 255, high = 0; uint64_t sum = 0;
+            for (DWORD i = 0; i < std::min<DWORD>(length, 1920 * 1080); i += 64)
+            { low = std::min(low, unsigned(pixels[i])); high = std::max(high, unsigned(pixels[i])); sum += pixels[i]; }
+            buffer->Unlock();
+            if (high - low > 15) ++nonGrayFrames;
+            if (decodedFrames && sum != previousSum_) ++changedFrames;
+            previousSum_ = sum; ++decodedFrames;
+        }
+    }
+    ComPtr<IMFTransform> decoder_;
+    std::vector<uint8_t> header_;
+    uint64_t previousSum_ = 0;
+};
+
+void RealDecodeCheck(bool software)
+{
+    AppSettings settings;
+    settings.overlayTemplate.clear(); settings.showCursor = false;
+    settings.privacyMasks = L"0,0,320,180";
+    settings.encoderPreference = software ? 2 : 1; settings.allowSoftwareEncoder = software;
+    ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context;
+    CheckHr(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+                nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context), "Create decode-check GPU device");
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = 1920; desc.Height = 1080; desc.MipLevels = desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM; desc.SampleDesc.Count = 1;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    ComPtr<ID3D11Texture2D> source; ComPtr<ID3D11RenderTargetView> view;
+    CheckHr(device->CreateTexture2D(&desc, nullptr, &source), "Create synthetic decode-check source");
+    CheckHr(device->CreateRenderTargetView(source.Get(), nullptr, &view), "Create synthetic source view");
+    GpuProcessor processor;
+    RECT desktop{ 0, 0, 1920, 1080 };
+    processor.Initialize(device.Get(), context.Get(), desc, DXGI_MODE_ROTATION_IDENTITY, settings, desktop);
+    DecoderCheck check;
+    H264Encoder encoder;
+    InitializeH264Encoder(encoder, device.Get(), DecoderCheck::Encoded, &check, settings);
+    for (unsigned frame = 0; frame < 48; ++frame)
+    {
+        const float phase = (frame % 12) / 12.0f;
+        const float color[] = { 0.1f + phase * 0.5f, 0.15f, 0.45f - phase * 0.2f, 1.0f };
+        context->ClearRenderTargetView(view.Get(), color);
+        ComPtr<ID3D11Texture2D> input; UINT subresource = 0;
+        auto sample = encoder.AllocateInput(&input, &subresource);
+        processor.Process(source.Get(), input.Get(), subresource);
+        encoder.Submit(sample.Get(), LONGLONG(frame) * (10'000'000 / 12));
+    }
+    encoder.Finalize(); check.Finish();
+}
 }
 
 int main(int argc, char* argv[])
@@ -228,7 +378,9 @@ int main(int argc, char* argv[])
     int status = 0;
     try
     {
-        if (argc > 1)
+        if (argc > 1 && std::string(argv[1]) == "--decode")
+            RealDecodeCheck(argc > 2 && std::string(argv[2]) == "--software");
+        else if (argc > 1)
         {
             // Real GPU/encoder test with in-memory settings and isolated diagnostic ports.
             // No production configuration, registry or autostart writes.

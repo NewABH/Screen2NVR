@@ -8,6 +8,7 @@
 #include "RtspServer.h"
 #include "Screen2ONVIF.h"
 #include "Settings.h"
+#include "Localization.h"
 #include "CaptureGeometry.h"
 #include "TrayApp.h"
 
@@ -219,7 +220,8 @@ bool ConfigureLogging(bool enabled, std::wstring& error)
 {
     const DWORD code = ApplicationLogger().SetEnabled(enabled);
     if (code == ERROR_SUCCESS) return true;
-    error = GetScreen2NvrLogDirectory() + L"\\Screen2NVR.log\nКод ошибки Windows: " + std::to_wstring(code);
+    error = GetScreen2NvrLogDirectory() + UiText(L"\\Screen2NVR.log\nКод ошибки Windows: ",
+                                                  L"\\Screen2NVR.log\nWindows error code: ") + std::to_wstring(code);
     return false;
 }
 
@@ -300,6 +302,7 @@ struct RuntimeOptions
     bool pipelineTest = false;
     DWORD restartWaitProcessId = 0;
     int autoStartAction = -1;
+    int languageAction = -1;
     bool forceSoftwareEncoderTest = false;
     bool securityTest = false;
     bool dualStreamTest = false;
@@ -329,6 +332,8 @@ RuntimeOptions ParseOptions(int argc, wchar_t* argv[])
             options.restartWaitProcessId = static_cast<DWORD>(std::stoul(argv[++index]));
         else if (argument == L"--set-autostart=1") options.autoStartAction = 1;
         else if (argument == L"--set-autostart=0") options.autoStartAction = 0;
+        else if (argument == L"--set-language=ru") options.languageAction = 0;
+        else if (argument == L"--set-language=en") options.languageAction = 1;
         else if (argument == L"--software-encoder-test")
         {
             options.forceSoftwareEncoderTest = true;
@@ -415,9 +420,10 @@ public:
             std::lock_guard<std::mutex> lock(health->mutex);
             health->adapterName = selectedDesc.Description;
             health->monitorName = outputDesc_.DeviceName;
-            health->sourceDescription = settings.captureMode == 0 ? L"Монитор целиком" :
-                settings.captureMode == 1 ? L"Область монитора" :
-                settings.captureMode == 2 ? L"Окно: " + settings.captureWindowTitle : L"Активное окно";
+            health->sourceDescription = settings.captureMode == 0 ? UiText(L"Монитор целиком", L"Entire monitor") :
+                settings.captureMode == 1 ? UiText(L"Область монитора", L"Monitor area") :
+                settings.captureMode == 2 ? UiText(L"Окно: ", L"Window: ") + settings.captureWindowTitle :
+                                            UiText(L"Активное окно", L"Active window");
         }
 
         constexpr D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
@@ -650,10 +656,11 @@ public:
         ComPtr<IDWriteTextFormat> format;
         CheckHr(writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                                 DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                                32.0f, L"ru-RU", &format), "CreateTextFormat(standby)");
+                                                 32.0f, IsEnglishUi() ? L"en-US" : L"ru-RU", &format),
+                "CreateTextFormat(standby)");
         format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        const std::wstring text = settings_.standbyText + L"\nПоследний кадр: " + CurrentTimestamp();
+        const std::wstring text = settings_.standbyText + UiText(L"\nПоследний кадр: ", L"\nLast frame: ") + CurrentTimestamp();
         d2dContext_->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), format.Get(),
                               D2D1::RectF(40, 40, static_cast<float>(kOutputWidth - 40),
                                           static_cast<float>(kOutputHeight - 40)), brush.Get());
@@ -1182,7 +1189,8 @@ float4 PSMain(VertexOutput input) : SV_Target
                                                 static_cast<DWRITE_FONT_WEIGHT>(settings_.timestampFontWeight),
                                                 settings_.timestampFontItalic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
                                                 DWRITE_FONT_STRETCH_NORMAL,
-                                                static_cast<float>(settings_.timestampFontSize), L"ru-RU", &textFormat_),
+                                                static_cast<float>(settings_.timestampFontSize),
+                                                IsEnglishUi() ? L"en-US" : L"ru-RU", &textFormat_),
                 "CreateTextFormat");
         CheckHr(textFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP), "SetWordWrapping");
     }
@@ -1348,7 +1356,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(health->mutex);
             health->encoderName = encoderName_;
-            health->encoderKind = hardware_ ? L"Аппаратный" : L"Программный (повышенная нагрузка CPU)";
+            health->encoderKind = hardware_ ? L"Hardware" : L"Software";
         }
         CheckHr(selected->ActivateObject(IID_PPV_ARGS(&transform_)), "ActivateObject(H.264 encoder)");
         ComPtr<IMFAttributes> transformAttributes;
@@ -2361,11 +2369,25 @@ int wmain(int argc, wchar_t* argv[])
             CloseHandle(previousProcess);
         }
     }
+    if (options.languageAction >= 0)
+    {
+        AppSettings settings = LoadAppSettings();
+        settings.uiLanguage = static_cast<uint32_t>(options.languageAction);
+        SetUiLanguage(settings.uiLanguage);
+        // Preserve user-authored standby messages; translate only the built-in default.
+        if (settings.standbyText == L"Экран временно недоступен" ||
+            settings.standbyText == L"Screen temporarily unavailable")
+            settings.standbyText = UiText(L"Экран временно недоступен", L"Screen temporarily unavailable");
+        std::wstring error;
+        if (SaveAppSettings(settings, error)) return 0;
+        MessageBoxW(nullptr, error.c_str(), UiText(L"Ошибка сохранения", L"Save error"), MB_OK | MB_ICONERROR);
+        return 1;
+    }
     if (options.autoStartAction >= 0)
     {
         std::wstring error;
         if (SetAutoStartEnabled(options.autoStartAction == 1, error)) return 0;
-        MessageBoxW(nullptr, error.c_str(), L"Screen2NVR — автозагрузка", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, error.c_str(), UiText(L"Screen2NVR — автозагрузка", L"Screen2NVR — startup"), MB_OK | MB_ICONERROR);
         return 1;
     }
 
@@ -2447,7 +2469,7 @@ int wmain(int argc, wchar_t* argv[])
             catch (const std::exception& error)
             {
                 std::lock_guard<std::mutex> lock(status.mutex);
-                status.error = L"Ошибка: " + AsciiToWide(error.what());
+                status.error = UiText(L"Ошибка: ", L"Error: ") + AsciiToWide(error.what());
                 Log(std::string("Pipeline failure: ") + error.what());
             }
             if (SUCCEEDED(workerCom)) CoUninitialize();
